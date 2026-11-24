@@ -115,5 +115,19 @@ test('large boards stay responsive when zoomed out', async ({ page }) => {
   })
   // 5,000 items on screen at once must draw in well under a second (it took 16 s before the overview renderer)
   expect(ms).toBeLessThan(1500)
-  expect(await page.locator('.wc-item').count()).toBeLessThan(1300)
+  expect(await page.locator('.wc-item').count()).toBeLessThan(700)
+  // zooming back in hands over to the detailed renderer and leaves nothing stale on the overview canvas
+  const state = await page.evaluate(async () => {
+    const wc = (window as any).__wc
+    wc.useBoard.getState().setCamera({ x: 100, y: 100, z: 1 })
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+    const c = document.querySelector('canvas.wc-overview') as HTMLCanvasElement
+    const data = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data
+    let painted = 0
+    for (let i = 3; i < data.length; i += 4 * 97) if (data[i]) painted++
+    return { overview: wc.useBoard.getState().overview, painted, dom: document.querySelectorAll('.wc-item').length }
+  })
+  expect(state.overview).toBe(false)
+  expect(state.painted).toBe(0)
+  expect(state.dom).toBeGreaterThan(5)
 })

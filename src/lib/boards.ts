@@ -76,7 +76,7 @@ export async function trashBoard(b: BoardRow, trashed: boolean) {
 export async function deleteBoard(b: BoardRow) {
   if (b.local) { await deleteLocalBoard(b.id); return }
   // remove uploaded files first; storage is not cleaned up by the database cascade
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 500; i++) {
     const { data } = await supabase.storage.from('board-assets').list(b.id, { limit: 100 })
     if (!data?.length) break
     const { error: rmError } = await supabase.storage.from('board-assets').remove(data.map((f) => `${b.id}/${f.name}`))

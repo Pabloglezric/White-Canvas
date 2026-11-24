@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import { FRAME_PRESETS, HL_COLORS, INK_COLORS, SHAPE_KINDS, STICKY_COLORS, make } from '../defaults'
 import { shapePath } from '../geometry'
-import { addItems } from '../ops'
+import { addItems, freeSpot } from '../ops'
 import { S, canComment, canEdit, redo, undo, useBoard, viewCenter } from '../store'
 import type { Route, Tool } from '../types'
 import { Swatches, useNarrow } from './kit'
@@ -151,7 +151,7 @@ export function Toolbar() {
                 <button
                   key={p.label}
                   onClick={() => {
-                    const c = viewCenter()
+                    const c = freeSpot(viewCenter(), p.w, p.h)
                     const n = Object.values(S().items).filter((i) => i.type === 'frame').length + 1
                     addItems([make.frame({ x: c.x - p.w / 2, y: c.y - p.h / 2, w: p.w, h: p.h, title: `${p.label} ${n}` })])
                     S().setTool('select'); setFly(null)

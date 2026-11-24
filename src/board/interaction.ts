@@ -431,9 +431,10 @@ export class Interaction {
       case 'marquee': {
         const box = { x: Math.min(m.w0.x, w.x), y: Math.min(m.w0.y, w.y), w: Math.abs(w.x - m.w0.x), h: Math.abs(w.y - m.w0.y) }
         const ids: string[] = [...m.base]
+        const have = new Set(ids)
         for (const id in s.items) {
           const it = s.items[id]
-          if (it.locked || it.type === 'comment' || ids.includes(id)) continue
+          if (it.locked || it.type === 'comment' || have.has(id)) continue
           const b = itemBox(it, s.items)
           // frames must be fully enclosed; everything else just touched
           if (it.type === 'frame' ? b.x >= box.x && b.y >= box.y && b.x + b.w <= box.x + box.w && b.y + b.h <= box.y + box.h : intersects(box, b)) ids.push(id)

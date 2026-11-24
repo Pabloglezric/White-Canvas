@@ -197,7 +197,7 @@ export function commit(opts: { history?: boolean } = {}) {
   if (!changed.length && !removed.length) return
   useBoard.setState({
     items,
-    undo: history ? [...s.undo, { before, after }].slice(-300) : s.undo,
+    undo: history ? [...s.undo, { before, after }].slice(-120) : s.undo,
     redo: history ? [] : s.redo,
   })
   hooks.onCommit?.(changed, removed)

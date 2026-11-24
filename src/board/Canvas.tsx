@@ -70,7 +70,7 @@ function useScene(canvasRef: React.RefObject<HTMLCanvasElement | null>): string[
       const c = canvasRef.current
       if (c) {
         if (next.overview) { sizeCanvas(); paintOverview(c, S().items, next.overview, S().camera, S().theme === 'dark') }
-        else if (c.dataset.on === '1') c.getContext('2d')?.clearRect(0, 0, c.width, c.height)
+        else if (c.dataset.on === '1') { const ctx = c.getContext('2d'); if (ctx) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, c.width, c.height) } }
         c.dataset.on = next.overview ? '1' : '0'
       }
       const s = S()

@@ -54,7 +54,8 @@ export function TopBar() {
   const meta = useBoard((s) => s.meta)
   const sync = useBoard((s) => s.syncState)
   const role = useBoard((s) => s.role)
-  const peers = useBoard((s) => s.peers)
+  // re-render only when the roster changes, not on every cursor packet
+  const roster = useBoard((s) => Object.values(s.peers).map((p) => `${p.id}|${p.name}|${p.color}`).join(','))
   const following = useBoard((s) => s.following)
   const me = useBoard((s) => s.me)
   const theme = useBoard((s) => s.theme)
@@ -68,7 +69,7 @@ export function TopBar() {
   useEffect(() => setTitle(meta?.title || ''), [meta?.title])
   const editor = role === 'owner' || role === 'editor'
   const panel = (p: NonNullable<ReturnType<typeof S>['panel']>) => useBoard.setState({ panel: S().panel === p ? null : p, activeComment: null })
-  const peerList = Object.values(peers)
+  const peerList = useMemo(() => Object.values(S().peers), [roster]) // eslint-disable-line react-hooks/exhaustive-deps
   const syncLabel = { synced: 'All changes saved', saving: 'Saving…', offline: 'Offline — changes are kept on this device and sync when you reconnect', local: 'Stored on this device only' }[sync]
 
   const present = () => {

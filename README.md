@@ -34,11 +34,25 @@ npm run dev
 
 Without those variables the app still runs with device-only boards.
 
+## Test
+
+```bash
+npm run test:unit
+```
+
+```bash
+npm run build && npm run test:e2e
+```
+
+End-to-end tests run against the production build with device-only boards, so they need no account.
+The audit behind the current hardening is in `docs/AUDIT.md`.
+
 ## Layout
 
-- `src/board/` — the canvas engine: `store.ts` (state, undo, remote merge), `interaction.ts` (pointer, touch, wheel,
-  keyboard), `geometry.ts` (connector routing, shapes, snapping), `items/` (renderers), `sync.ts` (load, save,
-  realtime, offline), `importers.ts`, `export.ts`, `ifc/IfcViewer.tsx`, `ui/` (toolbars and panels).
+- `src/board/` — the canvas engine: `store.ts` (state, undo, remote merge), `validate.ts` (the single gate for
+  incoming item data), `interaction.ts` (pointer, touch, wheel, keyboard), `geometry.ts` (connector routing, shapes,
+  snapping), `items/` (detailed renderers), `overview.ts` (canvas renderer for crowded views), `sync.ts` (load, save,
+  realtime, offline), `importers.ts`, `export.ts`, `ifc/` (viewer and parsing worker), `ui/` (toolbars and panels).
 - `src/pages/` — dashboard, sign-in, settings (profile and agent tokens), board page.
 - `supabase/migrations/` — schema, RLS policies, storage and realtime policies.
 - `supabase/functions/mcp` — agent server. `supabase/functions/unfurl` — link previews and frame-ability check.
