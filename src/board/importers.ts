@@ -61,20 +61,21 @@ export async function addEmbed(input: string, at: Pt): Promise<Item | null> {
     return it
   }
   const known = providerEmbed(url)
-  const w = known?.w || 640, h = known?.h || 420
-  const it: EmbedItem = make.embed({ x: at.x - w / 2, y: at.y - h / 2, w, h, url, src: known?.src, kind: 'iframe', title: known?.title })
-  addItems([it])
-  if (!known) {
-    // Ask the server whether the site allows framing; fall back to a link card instead of a blank box.
-    unfurl(url).then((meta) => {
-      const cur = S().items[it.id] as EmbedItem | undefined
-      if (!cur || !meta) return
-      const next: EmbedItem = { ...cur, title: meta.title || cur.title, desc: meta.description, thumb: meta.image, site: meta.site }
-      if (!meta.frameable) { next.kind = 'link'; next.w = 360; next.h = meta.image ? 300 : 130; next.x = at.x - 180; next.y = at.y - next.h / 2 }
-      addItems([next], { keepZ: true, select: false })
-      if (!meta.frameable) toast('This site blocks embedding — added as a link preview')
-    })
+  if (known) {
+    const it: EmbedItem = make.embed({ x: at.x - (known.w || 640) / 2, y: at.y - (known.h || 420) / 2, w: known.w || 640, h: known.h || 420, url, src: known.src, kind: 'iframe', title: known.title })
+    addItems([it])
+    return it
   }
+  // Unknown site: ask the server first whether it allows framing, so a blocked site is never loaded into
+  // a blank box. Sites that refuse become a link preview.
+  toast('Checking link…')
+  const meta = await unfurl(url)
+  if (S().boardId == null) return null
+  const link = !!meta && !meta.frameable
+  const w = link ? 360 : 640, h = link ? (meta?.image ? 300 : 130) : 420
+  const it: EmbedItem = make.embed({ x: at.x - w / 2, y: at.y - h / 2, w, h, url, kind: link ? 'link' : 'iframe', title: meta?.title, desc: meta?.description, thumb: meta?.image, site: meta?.site })
+  addItems([it])
+  if (link) toast('This site blocks embedding — added as a link preview')
   return it
 }
 
