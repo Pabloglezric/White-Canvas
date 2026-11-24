@@ -13,7 +13,7 @@ export function useMedia(query: string): boolean {
   }, [query])
   return on
 }
-export const useNarrow = () => useMedia('(max-width: 640px)')
+export const useNarrow = () => useMedia('(max-width: 640px), (max-height: 520px)')
 export const useFlexMode = () => useMedia('(vertical-viewport-segments: 2)')
 
 interface PopProps {

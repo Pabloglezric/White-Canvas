@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import {
   ArrowUpRight, Eraser, Frame, Hand, Highlighter, Lock, MessageCircle, MousePointer2, PenLine, Plus, Redo2, Shapes,
   StickyNote, Type, Undo2,
@@ -8,7 +9,7 @@ import { shapePath } from '../geometry'
 import { addItems } from '../ops'
 import { S, canComment, canEdit, redo, undo, useBoard, viewCenter } from '../store'
 import type { Route, Tool } from '../types'
-import { Swatches } from './kit'
+import { Swatches, useNarrow } from './kit'
 
 const ROUTES: { route: Route; label: string; d: string }[] = [
   { route: 'straight', label: 'Straight', d: 'M3 17 L21 5' },
@@ -22,9 +23,10 @@ export function Toolbar() {
   const role = useBoard((s) => s.role)
   const canUndo = useBoard((s) => s.undo.length > 0)
   const canRedo = useBoard((s) => s.redo.length > 0)
-  const prefs = useBoard()
+  const prefs = useBoard(useShallow((s) => ({ stickyColor: s.stickyColor, shapeKind: s.shapeKind, connRoute: s.connRoute, fingerDraws: s.fingerDraws, penColor: s.penColor, hlColor: s.hlColor, penSize: s.penSize, hlSize: s.hlSize, setPrefs: s.setPrefs })))
   const [fly, setFly] = useState<Tool | null>(null)
   const editor = role === 'owner' || role === 'editor'
+  const narrow = useNarrow()
 
   useEffect(() => {
     const down = (e: PointerEvent) => { if ((e.target as HTMLElement).closest?.('[data-canvas]')) setFly(null) }
@@ -51,10 +53,19 @@ export function Toolbar() {
     </button>
   )
 
+  const history = (
+    <>
+      <button className="wc-btn" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!canUndo} onClick={undo}><Undo2 size={18} /></button>
+      <button className="wc-btn" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled={!canRedo} onClick={redo}><Redo2 size={18} /></button>
+    </>
+  )
+
   return (
+    <>
+    {narrow && editor && <div className="wc-ui wc-undo wc-surface">{history}</div>}
     <div className="wc-ui wc-toolbar wc-surface" role="toolbar" aria-label="Tools">
       {btn('select', <MousePointer2 size={19} />, 'Select (V)')}
-      {btn('hand', <Hand size={19} />, 'Pan (H or hold Space)')}
+      {!narrow && btn('hand', <Hand size={19} />, 'Pan (H or hold Space)')}
       {editor && (
         <>
           <div className="wc-sep is-h" />
@@ -74,17 +85,16 @@ export function Toolbar() {
           <button className="wc-btn" title="Insert: files, embeds, 3D models, tables, templates" aria-label="Insert" onClick={() => useBoard.setState({ panel: S().panel === 'insert' ? null : 'insert' })}>
             <Plus size={20} />
           </button>
-          <div className="wc-sep is-h" />
-          <button className="wc-btn" title="Undo (Ctrl+Z)" aria-label="Undo" disabled={!canUndo} onClick={undo}><Undo2 size={18} /></button>
-          <button className="wc-btn" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled={!canRedo} onClick={redo}><Redo2 size={18} /></button>
+          {!narrow && <><div className="wc-sep is-h" />{history}</>}
         </>
       )}
       {toolLock && tool !== 'select' && (
         <span className="wc-btn" title="Tool locked — press Esc to release" style={{ color: 'var(--accent)' }}><Lock size={14} /></span>
       )}
 
+    </div>
       {fly && fly === tool && (
-        <div className="wc-flyout wc-surface" onPointerDown={(e) => e.stopPropagation()}>
+        <div className="wc-ui wc-flyout wc-surface" onPointerDown={(e) => e.stopPropagation()}>
           {fly === 'sticky' && <Swatches colors={STICKY_COLORS} value={prefs.stickyColor} onPick={(c) => prefs.setPrefs({ stickyColor: c })} />}
           {fly === 'shape' && (
             <div className="wc-shapes">
@@ -154,7 +164,7 @@ export function Toolbar() {
           )}
         </div>
       )}
-    </div>
+    </>
   )
 }
 

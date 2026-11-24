@@ -821,6 +821,13 @@ export class Interaction {
     if (isTyping(e)) return
     const mod = e.ctrlKey || e.metaKey
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key
+    if (s.editingId) {
+      // Keys that arrive before the editor has focus still belong to the text being edited.
+      const el = document.querySelector<HTMLElement>('[data-editing="true"][data-rich]')
+      if (el && e.key.length === 1 && !mod) { e.preventDefault(); el.focus(); document.execCommand('insertText', false, e.key) }
+      else if (k === 'Escape') finishEditing()
+      return
+    }
 
     if (s.presenting != null) {
       const frames = orderedFrames()

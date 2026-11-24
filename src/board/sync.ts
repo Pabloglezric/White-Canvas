@@ -228,7 +228,8 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   const setPeer = (id: string, patch: Partial<Peer>) => {
     const cur = peers()[id]
     if (!cur && !patch.name) return
-    useBoard.setState({ peers: { ...peers(), [id]: { id, user: '', name: 'Guest', color: '#888', seen: Date.now(), ...cur, ...patch } as Peer } })
+    const base: Peer = cur || { id, user: '', name: 'Guest', color: '#888', seen: Date.now() }
+    useBoard.setState({ peers: { ...peers(), [id]: { ...base, ...patch } } })
   }
   try { await supabase.realtime.setAuth() } catch { /* not signed in */ }
   if (stale()) return
