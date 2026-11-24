@@ -51,7 +51,7 @@ function InsertPanel() {
   const [data, setData] = useState('')
   const stickyColor = useBoard((s) => s.stickyColor)
   const at = () => viewCenter()
-  const done = () => { if (window.matchMedia('(max-width: 640px)').matches) close() }
+  const done = () => close()
   const tool = (t: 'card' | 'table' | 'code') => { S().setTool(t); close(); toast('Tap the board to place it') }
   const tile = (icon: React.ReactNode, label: string, sub: string, onClick: () => void) => (
     <button className="wc-list-item" onClick={onClick} style={{ alignItems: 'flex-start' }}>

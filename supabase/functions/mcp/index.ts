@@ -3,7 +3,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
 
 const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, { auth: { persistSession: false } })
-const APP_URL = (Deno.env.get('APP_URL') || 'https://white-canvas.vercel.app').replace(/\/$/, '')
+const APP_URL = (Deno.env.get('APP_URL') || 'https://white-canvas-three.vercel.app').replace(/\/$/, '')
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, content-type, mcp-session-id, mcp-protocol-version, accept',

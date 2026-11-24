@@ -37,6 +37,8 @@ export function ContextBar() {
   const flex = useFlexMode()
   const sel = selection.map((id) => items[id]).filter(Boolean) as Item[]
   if (!sel.length || tool !== 'select' || presenting || marquee || (role !== 'owner' && role !== 'editor')) return null
+  // interactive items (3D viewer, live embed, card/code editors) own the screen while active
+  if (editingId && sel.some((i) => i.id === editingId && (i.type === 'ifc' || i.type === 'embed' || i.type === 'card' || i.type === 'code'))) return null
 
   const first = sel[0]
   const types = new Set(sel.map((i) => i.type))
