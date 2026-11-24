@@ -7,14 +7,56 @@ const CORS = {
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...CORS, 'Content-Type': 'application/json' } })
 
-function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '')
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true
+function isPrivateV4(ip: string): boolean {
+  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/)
+  if (!m) return true
+  const [a, b, c] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) ||
+    (a === 100 && b >= 64 && b <= 127) || (a === 192 && b === 0 && c === 0) || (a === 192 && b === 0 && c === 2) || (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113) || a >= 224
+}
+function isPrivateV6(ip: string): boolean {
+  const h = ip.toLowerCase()
+  if (h === '::' || h === '::1') return true
+  const mapped = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
+  if (mapped) return isPrivateV4(mapped[1])
+  return /^(fc|fd|fe8|fe9|fea|feb|ff)/.test(h) || h.startsWith('64:ff9b:') || h.startsWith('2001:db8:')
+}
+
+/** True unless the host is a public name whose every address is public (blocks rebinding to internal IPs). */
+async function isPrivateHost(host: string): Promise<boolean> {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+  if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.arpa')) return true
   if (h.includes(':')) return true // IPv6 literals are not needed for link previews
-  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/)
-  if (!m) return !h.includes('.')
-  const [a, b] = [Number(m[1]), Number(m[2])]
-  return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127) || a >= 224
+  if (/^[\d.]+$/.test(h) || /^0x/i.test(h)) return true // IP literals in any encoding
+  if (!h.includes('.')) return true
+  const [v4, v6] = await Promise.all([
+    Deno.resolveDns(h, 'A').catch(() => [] as string[]),
+    Deno.resolveDns(h, 'AAAA').catch(() => [] as string[]),
+  ])
+  if (!v4.length && !v6.length) return true
+  return v4.some(isPrivateV4) || v6.some(isPrivateV6)
+}
+
+// Best-effort per-user rate limit (per function instance): 30 previews a minute.
+const hits = new Map<string, number[]>()
+function allow(key: string): boolean {
+  const now = Date.now()
+  const list = (hits.get(key) || []).filter((t) => now - t < 60_000)
+  if (list.length >= 30) { hits.set(key, list); return false }
+  list.push(now)
+  hits.set(key, list)
+  if (hits.size > 5000) hits.clear()
+  return true
+}
+
+/** The gateway has already verified the JWT signature; require a signed-in user rather than the public key. */
+function userId(req: Request): string | null {
+  try {
+    const part = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').split('.')[1]
+    const claims = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')))
+    return claims.role === 'authenticated' && typeof claims.sub === 'string' ? claims.sub : null
+  } catch { return null }
 }
 
 function meta(html: string, names: string[]): string | undefined {
@@ -29,9 +71,12 @@ function meta(html: string, names: string[]): string | undefined {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS })
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405)
+  const uid = userId(req)
+  if (!uid) return json({ error: 'Sign in required' }, 401)
+  if (!allow(uid)) return json({ error: 'Too many requests' }, 429)
   let target: URL
   try { target = new URL(String((await req.json()).url)) } catch { return json({ error: 'Invalid url' }, 400) }
-  if (!/^https?:$/.test(target.protocol) || isPrivateHost(target.hostname)) return json({ error: 'Unsupported address' }, 400)
+  if (!/^https?:$/.test(target.protocol) || target.username || target.password || (await isPrivateHost(target.hostname))) return json({ error: 'Unsupported address' }, 400)
   try {
     let url = target
     let res: Response | null = null
@@ -41,7 +86,7 @@ Deno.serve(async (req) => {
       const loc = res.headers.get('location')
       if (res.status >= 300 && res.status < 400 && loc) {
         url = new URL(loc, url)
-        if (!/^https?:$/.test(url.protocol) || isPrivateHost(url.hostname)) return json({ error: 'Unsupported address' }, 400)
+        if (!/^https?:$/.test(url.protocol) || (await isPrivateHost(url.hostname))) return json({ error: 'Unsupported address' }, 400)
         await res.body?.cancel()
         continue
       }
@@ -68,7 +113,8 @@ Deno.serve(async (req) => {
       if (image) { try { image = new URL(image, url).toString() } catch { image = undefined } }
       if (/<meta[^>]+http-equiv=["']x-frame-options["']/i.test(html)) frameable = false
     } else await res.body?.cancel()
-    return json({ frameable, title: title?.slice(0, 200), description: description?.slice(0, 400), image, site: site || url.hostname.replace(/^www\./, ''), final_url: url.toString() })
+    if (image && !/^https:\/\//.test(image)) image = undefined
+    return json({ frameable, title: title?.slice(0, 200), description: description?.slice(0, 400), image, site: (site || url.hostname.replace(/^www\./, '')).slice(0, 80) })
   } catch {
     return json({ frameable: false, site: target.hostname.replace(/^www\./, '') })
   }

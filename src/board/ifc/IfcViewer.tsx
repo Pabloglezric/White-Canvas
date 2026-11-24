@@ -1,5 +1,5 @@
-// In-board IFC (BIM) viewer: web-ifc parses the model, three.js renders it.
-// Loaded lazily so the 3D stack never weighs on boards that do not use it.
+// In-board IFC (BIM) viewer. A worker parses the file with web-ifc; this component renders the result
+// with three.js. Everything here is lazy-loaded, so boards without models never pay for the 3D stack.
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -7,95 +7,91 @@ import { Maximize, Scissors, ScanEye, X } from 'lucide-react'
 import { fetchAssetBytes } from '../assets'
 import { S, commit, update, useBoard } from '../store'
 import type { IfcItem } from '../types'
+import type { FromWorker, PropInfo, ToWorker } from './ifc.worker'
 
-interface Chunk { id: number; mesh: THREE.Mesh; start: number; count: number }
-interface Model { group: THREE.Group; chunks: Chunk[]; box: THREE.Box3; props: (id: number) => Promise<PropInfo> }
-interface PropInfo { type: string; name: string; globalId: string; sets: { name: string; props: [string, string][] }[] }
+interface Part { mesh: THREE.Mesh; start: number; count: number }
+interface Model {
+  group: THREE.Group
+  byElement: Map<number, Part[]>
+  box: THREE.Box3
+  props: (id: number) => Promise<PropInfo>
+  dispose: () => void
+}
 
+// Parsed models are kept while the board is open so reopening a viewer is instant; least recently used go first.
 const cache = new Map<string, Promise<Model>>()
+const MAX_CACHED = 2
 
-async function loadModel(src: string, onStatus: (s: string) => void): Promise<Model> {
-  onStatus('Downloading model…')
-  const data = new Uint8Array(await fetchAssetBytes(src))
-  onStatus('Starting IFC engine…')
-  const WebIFC = await import('web-ifc')
-  const api = new WebIFC.IfcAPI()
-  api.SetWasmPath('/wasm/', true)
-  await api.Init()
-  onStatus('Reading geometry…')
-  const modelID = api.OpenModel(data, { COORDINATE_TO_ORIGIN: true })
+function evict(src: string) {
+  const job = cache.get(src)
+  cache.delete(src)
+  job?.then((m) => m.dispose()).catch(() => {})
+}
 
-  // Merge geometry by colour so even large models stay at a handful of draw calls.
-  const buckets = new Map<string, { color: THREE.Color; alpha: number; pos: number[]; nor: number[]; idx: number[]; parts: { id: number; start: number; count: number }[] }>()
-  const m = new THREE.Matrix4(), n = new THREE.Matrix3(), v = new THREE.Vector3()
-  api.StreamAllMeshes(modelID, (mesh) => {
-    const list = mesh.geometries
-    for (let i = 0; i < list.size(); i++) {
-      const pg = list.get(i)
-      const geom = api.GetGeometry(modelID, pg.geometryExpressID)
-      const verts = api.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize())
-      const index = api.GetIndexArray(geom.GetIndexData(), geom.GetIndexDataSize())
-      const c = pg.color
-      const key = `${c.x.toFixed(3)},${c.y.toFixed(3)},${c.z.toFixed(3)},${c.w.toFixed(2)}`
-      let b = buckets.get(key)
-      if (!b) { b = { color: new THREE.Color(c.x, c.y, c.z), alpha: c.w, pos: [], nor: [], idx: [], parts: [] }; buckets.set(key, b) }
-      m.fromArray(pg.flatTransformation)
-      n.getNormalMatrix(m)
-      const base = b.pos.length / 3
-      for (let k = 0; k < verts.length; k += 6) {
-        v.set(verts[k], verts[k + 1], verts[k + 2]).applyMatrix4(m)
-        b.pos.push(v.x, v.y, v.z)
-        v.set(verts[k + 3], verts[k + 4], verts[k + 5]).applyMatrix3(n).normalize()
-        b.nor.push(v.x, v.y, v.z)
-      }
-      b.parts.push({ id: mesh.expressID, start: b.idx.length, count: index.length })
-      for (let k = 0; k < index.length; k++) b.idx.push(index[k] + base)
-      geom.delete()
-    }
-  })
-
-  const group = new THREE.Group()
-  const chunks: Chunk[] = []
-  for (const b of buckets.values()) {
-    if (!b.idx.length) continue
-    const g = new THREE.BufferGeometry()
-    g.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3))
-    g.setAttribute('normal', new THREE.Float32BufferAttribute(b.nor, 3))
-    g.setIndex(b.pos.length / 3 > 65535 ? new THREE.Uint32BufferAttribute(b.idx, 1) : new THREE.Uint16BufferAttribute(b.idx, 1))
-    const mat = new THREE.MeshLambertMaterial({ color: b.color, transparent: b.alpha < 1, opacity: b.alpha, side: THREE.DoubleSide, depthWrite: b.alpha >= 1 })
-    const mesh = new THREE.Mesh(g, mat)
-    mesh.userData.baseOpacity = b.alpha
-    group.add(mesh)
-    for (const p of b.parts) chunks.push({ id: p.id, mesh, start: p.start, count: p.count })
-  }
-  const box = new THREE.Box3().setFromObject(group)
-  if (box.isEmpty()) throw new Error('This IFC file contains no 3D geometry')
-
-  const val = (x: unknown): string => {
-    if (x == null) return ''
-    if (typeof x === 'object' && 'value' in (x as object)) return String((x as { value: unknown }).value ?? '')
-    return typeof x === 'object' ? '' : String(x)
-  }
-  const props = async (id: number): Promise<PropInfo> => {
-    const info: PropInfo = { type: '', name: '', globalId: '', sets: [] }
-    try {
-      const line = api.GetLine(modelID, id)
-      info.type = api.GetNameFromTypeCode(line.type) || ''
-      info.name = val(line.Name) || val(line.ObjectType)
-      info.globalId = val(line.GlobalId)
-      const sets = await api.properties.getPropertySets(modelID, id, true)
-      for (const s of (sets || []).slice(0, 12)) {
-        const list: [string, string][] = []
-        for (const p of (s.HasProperties || s.Quantities || []).slice(0, 40)) {
-          const value = val(p.NominalValue) || val(p.LengthValue) || val(p.AreaValue) || val(p.VolumeValue) || val(p.CountValue) || val(p.WeightValue)
-          if (val(p.Name)) list.push([val(p.Name), value])
+function loadModel(src: string, onStatus: (s: string) => void): Promise<Model> {
+  return new Promise<Model>((resolve, reject) => {
+    const worker = new Worker(new URL('./ifc.worker.ts', import.meta.url), { type: 'module' })
+    const send = (m: ToWorker, transfer: Transferable[] = []) => worker.postMessage(m, transfer)
+    const waiting = new Map<number, (info: PropInfo) => void>()
+    let req = 0
+    let settled = false
+    const fail = (message: string) => { if (!settled) { settled = true; worker.terminate(); reject(new Error(message)) } }
+    worker.onerror = (e) => fail(e.message || 'The 3D engine could not start')
+    worker.onmessage = (e: MessageEvent<FromWorker>) => {
+      const msg = e.data
+      if (msg.type === 'status') onStatus(msg.text)
+      else if (msg.type === 'error') fail(msg.message)
+      else if (msg.type === 'props') { waiting.get(msg.req)?.(msg.info); waiting.delete(msg.req) }
+      else if (msg.type === 'model') {
+        const group = new THREE.Group()
+        const byElement = new Map<number, Part[]>()
+        for (const b of msg.buckets) {
+          const g = new THREE.BufferGeometry()
+          g.setAttribute('position', new THREE.BufferAttribute(b.position, 3))
+          g.setAttribute('normal', new THREE.BufferAttribute(b.normal, 3))
+          g.setIndex(new THREE.BufferAttribute(b.index, 1))
+          const alpha = b.color[3]
+          const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(b.color[0], b.color[1], b.color[2]), transparent: alpha < 1, opacity: alpha, side: THREE.DoubleSide, depthWrite: alpha >= 1 })
+          const mesh = new THREE.Mesh(g, mat)
+          mesh.userData.baseOpacity = alpha
+          mesh.userData.parts = b.parts // triples: element id, first index, index count (ascending by first index)
+          group.add(mesh)
+          for (let i = 0; i < b.parts.length; i += 3) {
+            const id = b.parts[i]
+            let list = byElement.get(id)
+            if (!list) byElement.set(id, (list = []))
+            list.push({ mesh, start: b.parts[i + 1], count: b.parts[i + 2] })
+          }
         }
-        if (list.length) info.sets.push({ name: val(s.Name), props: list })
+        const box = new THREE.Box3().setFromObject(group)
+        settled = true
+        resolve({
+          group, byElement, box,
+          props: (id) => new Promise<PropInfo>((res) => { const r = ++req; waiting.set(r, res); send({ type: 'props', req: r, id }) }),
+          dispose: () => {
+            group.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) { m.geometry.dispose(); (m.material as THREE.Material).dispose() } })
+            send({ type: 'dispose' })
+            setTimeout(() => worker.terminate(), 500)
+          },
+        })
       }
-    } catch { /* properties are optional */ }
-    return info
+    }
+    onStatus('Downloading model…')
+    fetchAssetBytes(src).then((bytes) => send({ type: 'load', bytes }, [bytes])).catch((e: Error) => fail(e.message || 'Download failed'))
+  })
+}
+
+/** Finds which element a triangle belongs to (parts are sorted by first index). */
+function elementAt(parts: Int32Array, index: number): number | null {
+  let lo = 0, hi = parts.length / 3 - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    const start = parts[mid * 3 + 1], count = parts[mid * 3 + 2]
+    if (index < start) hi = mid - 1
+    else if (index >= start + count) lo = mid + 1
+    else return parts[mid * 3]
   }
-  return { group, chunks, box, props }
+  return null
 }
 
 export default function IfcViewer({ item }: { item: IfcItem }) {
@@ -110,40 +106,50 @@ export default function IfcViewer({ item }: { item: IfcItem }) {
   useEffect(() => {
     const el = host.current!
     let dead = false
-    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
-    renderer.setClearColor(0xeef0f3)
+    let renderer: THREE.WebGLRenderer
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
+    } catch {
+      setError('3D is not available on this device or browser'); setStatus('')
+      return
+    }
+    renderer.setClearColor(0xe9ecf1)
     renderer.localClippingEnabled = true
-    el.prepend(renderer.domElement)
-    Object.assign(renderer.domElement.style, { width: '100%', height: '100%', display: 'block', touchAction: 'none' })
+    const canvas = renderer.domElement
+    el.prepend(canvas)
+    Object.assign(canvas.style, { width: '100%', height: '100%', display: 'block', touchAction: 'none' })
     const scene = new THREE.Scene()
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 2.2))
-    const sun = new THREE.DirectionalLight(0xffffff, 1.6)
-    sun.position.set(1, 2, 1.5)
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x7c828e, 1.9))
+    const sun = new THREE.DirectionalLight(0xffffff, 2.1)
+    sun.position.set(1.2, 2, 0.8)
     scene.add(sun)
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000)
-    const controls = new OrbitControls(camera, renderer.domElement)
+    const controls = new OrbitControls(camera, canvas)
     controls.enableDamping = true
     controls.dampingFactor = 0.12
     const plane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0)
-    const highlight = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xff5a36, transparent: true, opacity: 0.65, depthTest: false, side: THREE.DoubleSide }))
+    const highlight = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xff5a36, transparent: true, opacity: 0.7, depthTest: false, side: THREE.DoubleSide }))
     highlight.renderOrder = 10
     highlight.visible = false
     scene.add(highlight)
     let model: Model | null = null
     let dirty = true
     let raf = 0
+    let cutting = false
 
     const size = () => {
-      const z = S().camera.z
       const w = el.clientWidth || item.w, h = el.clientHeight || item.h
-      renderer.setPixelRatio(Math.min(2.5, Math.max(1, window.devicePixelRatio * Math.min(2, z))))
+      // match the on-screen pixel density of the zoomed board, within sane limits
+      renderer.setPixelRatio(Math.min(2.5, Math.max(1, window.devicePixelRatio * Math.min(2, S().camera.z))))
       renderer.setSize(w, h, false)
-      camera.aspect = w / h
+      camera.aspect = w / Math.max(1, h)
       camera.updateProjectionMatrix()
       dirty = true
     }
     const ro = new ResizeObserver(size)
     ro.observe(el)
+    let zoomTimer = 0
+    const unsubZoom = useBoard.subscribe((s, p) => { if (s.camera.z !== p.camera.z) { clearTimeout(zoomTimer); zoomTimer = window.setTimeout(size, 220) } })
     size()
     const loop = () => {
       raf = requestAnimationFrame(loop)
@@ -151,6 +157,12 @@ export default function IfcViewer({ item }: { item: IfcItem }) {
     }
     loop()
     controls.addEventListener('change', () => { dirty = true })
+
+    // The browser may reclaim the GPU context (many tabs, low memory, backgrounding on phones).
+    const onLost = (e: Event) => { e.preventDefault(); cancelAnimationFrame(raf); if (!dead) setStatus('3D view paused — restoring…') }
+    const onRestored = () => { if (dead) return; setStatus(''); dirty = true; loop() }
+    canvas.addEventListener('webglcontextlost', onLost)
+    canvas.addEventListener('webglcontextrestored', onRestored)
 
     const fit = () => {
       if (!model) return
@@ -162,41 +174,35 @@ export default function IfcViewer({ item }: { item: IfcItem }) {
       camera.updateProjectionMatrix()
       dirty = true
     }
-
-    api.current = {
-      fit,
-      setXray: (on) => {
-        model?.group.children.forEach((o) => {
-          const mat = (o as THREE.Mesh).material as THREE.MeshLambertMaterial
-          const base = o.userData.baseOpacity as number
-          mat.transparent = on || base < 1
-          mat.opacity = on ? Math.min(base, 0.22) : base
-          mat.depthWrite = !on && base >= 1
-          mat.needsUpdate = true
-        })
-        dirty = true
-      },
-      setCut: (t) => {
-        if (!model) return
-        const mats = model.group.children.map((o) => (o as THREE.Mesh).material as THREE.Material)
-        if (t == null) mats.forEach((mt) => { mt.clippingPlanes = null })
-        else {
-          plane.constant = model.box.min.y + (model.box.max.y - model.box.min.y) * t
-          mats.forEach((mt) => { mt.clippingPlanes = [plane] })
-        }
-        dirty = true
-      },
+    const eachMaterial = (fn: (m: THREE.MeshLambertMaterial, base: number) => void) => model?.group.children.forEach((o) => fn((o as THREE.Mesh).material as THREE.MeshLambertMaterial, o.userData.baseOpacity as number))
+    const applyXray = (on: boolean) => {
+      eachMaterial((mat, base) => { mat.transparent = on || base < 1; mat.opacity = on ? Math.min(base, 0.22) : base; mat.depthWrite = !on && base >= 1; mat.needsUpdate = true })
+      dirty = true
     }
+    const applyCut = (t: number | null) => {
+      if (!model) return
+      cutting = t != null
+      if (t != null) plane.constant = model.box.min.y + (model.box.max.y - model.box.min.y) * t
+      eachMaterial((mat) => { mat.clippingPlanes = t == null ? null : [plane] })
+      dirty = true
+    }
+    api.current = { fit, setXray: applyXray, setCut: applyCut }
 
     let job = cache.get(item.src)
-    if (!job) { job = loadModel(item.src, (s) => { if (!dead) setStatus(s) }); cache.set(item.src, job); if (cache.size > 3) cache.delete(cache.keys().next().value!) }
+    if (job) { cache.delete(item.src); cache.set(item.src, job) } // mark as most recently used
+    else {
+      job = loadModel(item.src, (s) => { if (!dead) setStatus(s) })
+      cache.set(item.src, job)
+      while (cache.size > MAX_CACHED) evict(cache.keys().next().value!)
+    }
     job.then((mdl) => {
       if (dead) return
       model = mdl
       scene.add(mdl.group)
+      applyXray(false) // cached models may carry state from an earlier viewer
       fit()
       if (item.cam?.length === 6) { camera.position.fromArray(item.cam, 0); controls.target.fromArray(item.cam, 3) }
-      if (item.section != null) api.current?.setCut(item.section)
+      applyCut(item.section ?? null)
       setStatus('')
     }).catch((e: Error) => { cache.delete(item.src); if (!dead) { setError(e.message || 'Could not open this model'); setStatus('') } })
 
@@ -205,56 +211,63 @@ export default function IfcViewer({ item }: { item: IfcItem }) {
     const onDown = (e: PointerEvent) => { down = { x: e.clientX, y: e.clientY } }
     const onUp = (e: PointerEvent) => {
       if (!down || !model || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return
-      const r = renderer.domElement.getBoundingClientRect()
+      const r = canvas.getBoundingClientRect()
       const ray = new THREE.Raycaster()
       ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera)
-      const hit = ray.intersectObjects(model.group.children, false).find((h) => !plane || !(h.object as THREE.Mesh).material || !((h.object as THREE.Mesh).material as THREE.Material).clippingPlanes?.length || plane.distanceToPoint(h.point) >= 0)
-      if (!hit || hit.faceIndex == null) { highlight.visible = false; setPicked(null); dirty = true; return }
-      const at = hit.faceIndex * 3
-      const chunk = model.chunks.find((c) => c.mesh === hit.object && at >= c.start && at < c.start + c.count)
-      if (!chunk) return
-      const src = chunk.mesh.geometry
-      const g = new THREE.BufferGeometry()
-      g.setAttribute('position', src.getAttribute('position'))
-      const parts = model.chunks.filter((c) => c.id === chunk.id && c.mesh === chunk.mesh)
-      const index = src.getIndex()!
-      const idx: number[] = []
-      for (const p of parts) for (let k = p.start; k < p.start + p.count; k++) idx.push(index.getX(k))
-      g.setIndex(idx)
+      const hit = ray.intersectObjects(model.group.children, false).find((h) => !cutting || plane.distanceToPoint(h.point) >= 0)
+      const id = hit && hit.faceIndex != null ? elementAt((hit.object as THREE.Mesh).userData.parts as Int32Array, hit.faceIndex * 3) : null
       highlight.geometry.dispose()
+      if (id == null) { highlight.visible = false; setPicked(null); dirty = true; return }
+      // Copy just this element's triangles; the highlight owns its buffers and never touches the model's.
+      const parts = model.byElement.get(id) || []
+      const total = parts.reduce((a, p) => a + p.count, 0)
+      const out = new Float32Array(total * 3)
+      let o = 0
+      for (const p of parts) {
+        const pos = p.mesh.geometry.getAttribute('position'), index = p.mesh.geometry.getIndex()!
+        for (let k = p.start; k < p.start + p.count; k++) { const v = index.getX(k); out[o++] = pos.getX(v); out[o++] = pos.getY(v); out[o++] = pos.getZ(v) }
+      }
+      const g = new THREE.BufferGeometry()
+      g.setAttribute('position', new THREE.BufferAttribute(out, 3))
       highlight.geometry = g
       highlight.visible = true
       dirty = true
-      model.props(chunk.id).then((info) => { if (!dead) setPicked(info) })
+      model.props(id).then((info) => { if (!dead) setPicked(info) })
     }
-    renderer.domElement.addEventListener('pointerdown', onDown)
-    renderer.domElement.addEventListener('pointerup', onUp)
+    canvas.addEventListener('pointerdown', onDown)
+    canvas.addEventListener('pointerup', onUp)
 
     return () => {
       dead = true
       cancelAnimationFrame(raf)
+      clearTimeout(zoomTimer)
+      unsubZoom()
       ro.disconnect()
       // Leave a still image and the camera behind so the board shows the last view.
       try {
-        if (model) {
+        if (model && !renderer.getContext().isContextLost()) {
           highlight.visible = false
-          renderer.render(scene, camera)
+          renderer.render(scene, camera) // read back in the same task, so no preserved buffer is needed
           const snap = document.createElement('canvas')
-          const k = Math.min(1, 720 / renderer.domElement.width)
-          snap.width = Math.round(renderer.domElement.width * k); snap.height = Math.round(renderer.domElement.height * k)
-          snap.getContext('2d')!.drawImage(renderer.domElement, 0, 0, snap.width, snap.height)
+          const k = Math.min(1, 720 / canvas.width)
+          snap.width = Math.max(1, Math.round(canvas.width * k)); snap.height = Math.max(1, Math.round(canvas.height * k))
+          snap.getContext('2d')!.drawImage(canvas, 0, 0, snap.width, snap.height)
           const cam = [...camera.position.toArray(), ...controls.target.toArray()].map((n) => Math.round(n * 1000) / 1000)
           if (S().items[item.id] && (S().role === 'owner' || S().role === 'editor')) {
             update(item.id, { preview: snap.toDataURL('image/jpeg', 0.72), cam } as Partial<IfcItem>)
             commit({ history: false })
           }
-          scene.remove(model.group)
         }
       } catch { /* snapshot is best effort */ }
+      if (model) scene.remove(model.group)
+      highlight.geometry.dispose()
+      ;(highlight.material as THREE.Material).dispose()
+      canvas.removeEventListener('webglcontextlost', onLost)
+      canvas.removeEventListener('webglcontextrestored', onRestored)
       controls.dispose()
       renderer.dispose()
       renderer.forceContextLoss()
-      renderer.domElement.remove()
+      canvas.remove()
     }
   }, [item.id, item.src]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -262,17 +275,17 @@ export default function IfcViewer({ item }: { item: IfcItem }) {
 
   return (
     <div ref={host} data-editing="true" className="relative w-full h-full" style={{ touchAction: 'none' }} onKeyDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
-      {(status || error) && <div className="wc-placeholder absolute inset-0" style={{ background: 'rgba(238,240,243,.9)' }}>{error ? <span style={{ color: '#d93025' }}>{error}</span> : <><div className="wc-spin" /><span>{status}</span></>}</div>}
+      {(status || error) && <div className="wc-placeholder absolute inset-0" style={{ background: 'rgba(233,236,241,.92)' }} role="status">{error ? <span style={{ color: '#b3261e' }}>{error}</span> : <><div className="wc-spin" /><span>{status}</span></>}</div>}
       <div className="absolute left-2 top-2 flex gap-1 wc-surface" style={{ padding: 3, borderRadius: 10 }}>
-        <button className="wc-icon-btn" title="Fit model" onClick={() => api.current?.fit()}><Maximize size={15} /></button>
-        <button className="wc-icon-btn" title="X-ray" style={xray ? { background: 'var(--ink)', color: 'var(--surface)' } : undefined} onClick={() => { setXray(!xray); api.current?.setXray(!xray) }}><ScanEye size={15} /></button>
-        <button className="wc-icon-btn" title="Section cut" style={cut != null ? { background: 'var(--ink)', color: 'var(--surface)' } : undefined} onClick={() => saveCut(cut == null ? 0.5 : null)}><Scissors size={15} /></button>
+        <button className="wc-icon-btn" title="Fit model" aria-label="Fit model" onClick={() => api.current?.fit()}><Maximize size={15} /></button>
+        <button className="wc-icon-btn" title="X-ray" aria-label="X-ray" aria-pressed={xray} style={xray ? { background: 'var(--ink)', color: 'var(--surface)' } : undefined} onClick={() => { setXray(!xray); api.current?.setXray(!xray) }}><ScanEye size={15} /></button>
+        <button className="wc-icon-btn" title="Section cut" aria-label="Section cut" aria-pressed={cut != null} style={cut != null ? { background: 'var(--ink)', color: 'var(--surface)' } : undefined} onClick={() => saveCut(cut == null ? 0.5 : null)}><Scissors size={15} /></button>
         {cut != null && <input type="range" min={0} max={1} step={0.005} value={cut} onChange={(e) => saveCut(+e.target.value)} style={{ width: 110 }} aria-label="Section height" />}
-        <button className="wc-icon-btn" title="Close viewer (Esc)" onClick={() => { useBoard.setState({ editingId: null }); commit() }}><X size={15} /></button>
+        <button className="wc-icon-btn" title="Close viewer (Esc)" aria-label="Close viewer" onClick={() => { useBoard.setState({ editingId: null }); commit() }}><X size={15} /></button>
       </div>
       {picked && (
         <div className="absolute right-2 top-2 bottom-2 wc-surface overflow-y-auto text-xs" style={{ width: 'min(240px, 60%)', padding: 10, borderRadius: 10, userSelect: 'text' }}>
-          <div className="wc-row"><b className="flex-1 truncate text-sm">{picked.name || picked.type || 'Element'}</b><button className="wc-icon-btn" onClick={() => setPicked(null)}><X size={13} /></button></div>
+          <div className="wc-row"><b className="flex-1 truncate text-sm">{picked.name || picked.type || 'Element'}</b><button className="wc-icon-btn" aria-label="Close properties" onClick={() => setPicked(null)}><X size={13} /></button></div>
           <div style={{ color: 'var(--ink-3)' }}>{picked.type}</div>
           {picked.globalId && <div className="truncate" style={{ color: 'var(--ink-3)' }}>{picked.globalId}</div>}
           {picked.sets.map((s) => (

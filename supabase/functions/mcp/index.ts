@@ -1,6 +1,6 @@
 // White Canvas MCP server (Streamable HTTP, stateless JSON responses).
 // Lets coding agents such as Claude Code read and edit boards with a personal API token.
-import { createClient } from 'npm:@supabase/supabase-js@2'
+import { createClient } from 'npm:@supabase/supabase-js@2.119.2'
 
 const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, { auth: { persistSession: false } })
 const APP_URL = (Deno.env.get('APP_URL') || 'https://white-canvas-three.vercel.app').replace(/\/$/, '')
@@ -19,9 +19,11 @@ const COLORS: Record<string, string> = {
 const STRONG: Record<string, string> = { red: '#e5484d', orange: '#f76b15', yellow: '#d9a400', green: '#30a46c', blue: '#0090ff', purple: '#6e56cf', pink: '#d6409f', black: '#1c1e23', gray: '#6b6f7a', grey: '#6b6f7a', white: '#ffffff' }
 const color = (c: unknown, fallback: string, strong = false) => (typeof c !== 'string' || !c ? fallback : /^#[0-9a-f]{3,8}$/i.test(c) || c === 'transparent' ? c : (strong ? STRONG[c.toLowerCase()] : COLORS[c.toLowerCase()]) || fallback)
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-const html = (s: unknown) => esc(String(s ?? '')).replace(/\n/g, '<br>')
+const html = (s: unknown) => esc(String(s == null || typeof s === 'object' ? '' : s).slice(0, 20000)).replace(/\n/g, '<br>')
 const plain = (h: unknown) => String(h ?? '').replace(/<br\s*\/?>/gi, '\n').replace(/<\/(div|p|li)>/gi, '\n').replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').trim()
-const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d)
+const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(-1e7, Math.min(1e7, v)) : d)
+const str = (v: unknown, max = 2000) => (v == null ? undefined : String(typeof v === 'object' ? '' : v).slice(0, max))
+const strList = (v: unknown) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string' || typeof x === 'number').map((x) => String(x).slice(0, 60)).slice(0, 20) : undefined)
 const SHAPES = ['rect', 'round', 'ellipse', 'diamond', 'triangle', 'parallelogram', 'hexagon', 'star', 'pill', 'cylinder', 'cloud', 'callout', 'arrowRight', 'arrowLeft', 'pentagon', 'octagon', 'trapezoid', 'cross', 'document', 'predefined']
 
 async function sha256(s: string) {
@@ -29,11 +31,35 @@ async function sha256(s: string) {
   return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('')
 }
 
+// Best-effort per-token rate limit (per function instance): 120 requests a minute.
+class RateLimited extends Error {}
+const hits = new Map<string, number[]>()
+function allow(key: string): boolean {
+  const now = Date.now()
+  const list = (hits.get(key) || []).filter((t) => now - t < 60_000)
+  if (list.length >= 120) { hits.set(key, list); return false }
+  list.push(now)
+  hits.set(key, list)
+  if (hits.size > 5000) hits.clear()
+  return true
+}
+
+/** Database errors stay in the logs; callers get a short, safe message. */
+function dbError(e: { message?: string } | null): Error {
+  console.error('db error', e?.message)
+  const m = e?.message || ''
+  if (/item limit/.test(m)) return new Error('This board has reached the 50,000 item limit')
+  if (/data_size/.test(m)) return new Error('An item is too large (1 MB limit)')
+  return new Error('The board could not be read or saved. Try again.')
+}
+
 async function authenticate(req: Request): Promise<Ctx | null> {
   const m = (req.headers.get('authorization') || '').match(/^Bearer\s+(wc_[A-Za-z0-9]+)$/)
   if (!m) return null
-  const { data } = await admin.from('api_tokens').select('id,user_id,can_write').eq('token_hash', await sha256(m[1])).maybeSingle()
+  const { data } = await admin.from('api_tokens').select('id,user_id,can_write,expires_at').eq('token_hash', await sha256(m[1])).maybeSingle()
   if (!data) return null
+  if (data.expires_at && new Date(data.expires_at).getTime() < Date.now()) return null
+  if (!allow(data.id)) throw new RateLimited()
   admin.from('api_tokens').update({ last_used_at: new Date().toISOString() }).eq('id', data.id).then(() => {})
   return { user: data.user_id, write: data.can_write }
 }
@@ -58,7 +84,7 @@ async function loadItems(boardId: string): Promise<J[]> {
   const out: J[] = []
   for (let from = 0; ; from += 1000) {
     const { data, error } = await admin.from('board_items').select('id,data,rev').eq('board_id', boardId).eq('deleted', false).order('id').range(from, from + 999)
-    if (error) throw new Error(error.message)
+    if (error) throw dbError(error)
     for (const r of data || []) out.push({ ...r.data, id: r.id, rev: r.rev })
     if (!data || data.length < 1000) break
   }
@@ -68,7 +94,7 @@ async function saveItems(boardId: string, items: J[], deleted = false) {
   const rows = items.map((it) => ({ id: it.id, board_id: boardId, data: it, rev: it.rev, deleted, client_id: 'agent' }))
   for (let i = 0; i < rows.length; i += 200) {
     const { error } = await admin.from('board_items').upsert(rows.slice(i, i + 200), { onConflict: 'id' })
-    if (error) throw new Error(error.message)
+    if (error) throw dbError(error)
   }
 }
 
@@ -115,13 +141,13 @@ function build(spec: J, ctx: Ctx): J {
   const text = spec.text ?? spec.label ?? ''
   let it: J
   switch (t) {
-    case 'sticky': it = { ...base(t, x, y, num(spec.w, 200), num(spec.h, num(spec.w, 200)), ctx), html: html(text), fill: color(spec.color, COLORS.yellow), fontSize: num(spec.font_size, 18), align: 'center', valign: 'middle', tags: spec.tags }; break
+    case 'sticky': it = { ...base(t, x, y, num(spec.w, 200), num(spec.h, num(spec.w, 200)), ctx), html: html(text), fill: color(spec.color, COLORS.yellow), fontSize: num(spec.font_size, 18), align: 'center', valign: 'middle', tags: strList(spec.tags) }; break
     case 'text': { const fs = num(spec.font_size, 20); const lines = String(text).split('\n'); const w = num(spec.w, Math.min(640, Math.max(60, Math.max(...lines.map((l: string) => l.length)) * fs * 0.58 + 12))); it = { ...base(t, x, y, w, num(spec.h, Math.ceil(lines.length * fs * 1.3 + 4)), ctx), html: html(text), fontSize: fs, align: spec.align || 'left', bold: !!spec.bold, color: spec.text_color ? color(spec.text_color, '#1c1e23', true) : undefined }; break }
     case 'shape': it = { ...base(t, x, y, num(spec.w, 180), num(spec.h, 90), ctx), kind: SHAPES.includes(spec.shape) ? spec.shape : 'rect', html: html(text), fill: color(spec.color, '#ffffff'), stroke: color(spec.stroke, '#1c1e23', true), strokeW: num(spec.stroke_width, 2), fontSize: num(spec.font_size, 16), align: 'center', valign: 'middle' }; break
-    case 'frame': it = { ...base(t, x, y, num(spec.w, 800), num(spec.h, 600), ctx), title: String(spec.title ?? text ?? 'Frame'), fill: color(spec.color, '#ffffff') }; break
-    case 'card': it = { ...base(t, x, y, num(spec.w, 280), num(spec.h, 120), ctx), title: String(spec.title ?? text), desc: spec.description, status: spec.status, assignee: spec.assignee, due: spec.due, tags: spec.tags, fill: color(spec.color, '#0090ff', true) }; break
+    case 'frame': it = { ...base(t, x, y, num(spec.w, 800), num(spec.h, 600), ctx), title: str(spec.title ?? text, 200) || 'Frame', fill: color(spec.color, '#ffffff') }; break
+    case 'card': it = { ...base(t, x, y, num(spec.w, 280), num(spec.h, 120), ctx), title: str(spec.title ?? text, 300) || '', desc: str(spec.description, 4000), status: str(spec.status, 60), assignee: str(spec.assignee, 80), due: str(spec.due, 40), tags: strList(spec.tags), fill: color(spec.color, '#0090ff', true) }; break
     case 'table': {
-      const rows: string[][] = (Array.isArray(spec.rows) ? spec.rows : [['']]).map((r: unknown[]) => (Array.isArray(r) ? r : [r]).map((c) => String(c ?? '')))
+      const rows: string[][] = (Array.isArray(spec.rows) && spec.rows.length ? spec.rows.slice(0, 200) : [['']]).map((r: unknown[]) => (Array.isArray(r) ? r.slice(0, 30) : [r]).map((c) => (c == null || typeof c === 'object' ? '' : String(c).slice(0, 2000))))
       const cols = Math.max(1, ...rows.map((r) => r.length))
       for (const r of rows) while (r.length < cols) r.push('')
       const colW = Array.from({ length: cols }, (_, c) => Math.min(320, Math.max(90, ...rows.slice(0, 50).map((r) => r[c].length * 8 + 26))))
@@ -129,11 +155,11 @@ function build(spec: J, ctx: Ctx): J {
       it = { ...base(t, x, y, colW.reduce((a, b) => a + b, 0), rowH.reduce((a, b) => a + b, 0), ctx), cells: rows, colW, rowH, header: spec.header !== false, fontSize: 14 }
       break
     }
-    case 'code': { const code = String(spec.code ?? text); const lines = code.split('\n'); it = { ...base(t, x, y, num(spec.w, Math.min(900, Math.max(260, Math.max(...lines.map((l) => l.length)) * 8 + 40))), num(spec.h, Math.min(800, lines.length * 20 + 50)), ctx), code, lang: String(spec.language || 'text'), fontSize: 13, dark: true }; break }
-    case 'embed': it = { ...base(t, x, y, num(spec.w, 640), num(spec.h, 420), ctx), url: String(spec.url || ''), kind: spec.as_link ? 'link' : 'iframe', title: spec.title }; if (!/^https?:\/\//.test(it.url)) throw new Error('embed needs an http(s) url'); break
-    case 'image': it = { ...base(t, x, y, num(spec.w, 400), num(spec.h, 300), ctx), src: String(spec.url || ''), alt: spec.alt }; if (!/^https?:\/\//.test(it.src)) throw new Error('image needs an http(s) url'); break
-    case 'chart': it = { ...base(t, x, y, num(spec.w, 420), num(spec.h, 280), ctx), kind: ['bar', 'line', 'pie'].includes(spec.kind) ? spec.kind : 'bar', title: spec.title, labels: (spec.labels || []).map(String), values: (spec.values || []).map(Number) }; break
-    case 'comment': it = { ...base(t, x, y, 32, 32, ctx), thread: [{ id: crypto.randomUUID(), by: ctx.user, name: 'Agent', text: String(text), at: Date.now() }] }; break
+    case 'code': { const code = (str(spec.code ?? text, 100000) || ''); const lines = code.split('\n'); it = { ...base(t, x, y, num(spec.w, Math.min(900, Math.max(260, Math.max(...lines.map((l) => l.length)) * 8 + 40))), num(spec.h, Math.min(800, lines.length * 20 + 50)), ctx), code, lang: str(spec.language, 30) || 'text', fontSize: 13, dark: true }; break }
+    case 'embed': it = { ...base(t, x, y, num(spec.w, 640), num(spec.h, 420), ctx), url: str(spec.url, 2000) || '', kind: spec.as_link ? 'link' : 'iframe', title: str(spec.title, 200) }; if (!/^https:\/\//.test(it.url)) throw new Error('embed needs an https url'); break
+    case 'image': it = { ...base(t, x, y, num(spec.w, 400), num(spec.h, 300), ctx), src: str(spec.url, 2000) || '', alt: str(spec.alt, 300) }; if (!/^https:\/\//.test(it.src)) throw new Error('image needs an https url'); break
+    case 'chart': it = { ...base(t, x, y, num(spec.w, 420), num(spec.h, 280), ctx), kind: ['bar', 'line', 'pie'].includes(spec.kind) ? spec.kind : 'bar', title: str(spec.title, 200), labels: (Array.isArray(spec.labels) ? spec.labels : []).slice(0, 200).map((l: unknown) => str(l, 80) || ''), values: (Array.isArray(spec.values) ? spec.values : []).slice(0, 200).map((v: unknown) => num(Number(v), 0)) }; break
+    case 'comment': it = { ...base(t, x, y, 32, 32, ctx), thread: [{ id: crypto.randomUUID(), by: ctx.user, name: 'Agent', text: (str(text, 4000) || ''), at: Date.now() }] }; break
     default: throw new Error(`Unknown item type "${t}". Use sticky, text, shape, frame, card, table, code, embed, image, chart, comment or connector.`)
   }
   for (const k of Object.keys(it)) if (it[k] === undefined) delete it[k]
@@ -153,7 +179,7 @@ function connector(spec: J, resolve: (ref: unknown) => string | undefined, ctx: 
   return {
     ...base('connector', 0, 0, 0, 0, ctx), a: end(spec.from), b: end(spec.to), route: ['straight', 'elbow', 'curve'].includes(spec.route) ? spec.route : 'elbow',
     capA: caps.includes(spec.start_cap) ? spec.start_cap : 'none', capB: caps.includes(spec.end_cap) ? spec.end_cap : 'arrow',
-    stroke: color(spec.color, '#1c1e23', true), strokeW: num(spec.stroke_width, 2), ...(spec.label ? { label: String(spec.label) } : {}), ...(spec.dashed ? { dash: 'dashed' } : {}),
+    stroke: color(spec.color, '#1c1e23', true), strokeW: num(spec.stroke_width, 2), ...(spec.label ? { label: str(spec.label, 200) } : {}), ...(spec.dashed ? { dash: 'dashed' } : {}),
   }
 }
 
@@ -205,8 +231,8 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
     inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] },
     run: async (a, ctx) => {
       if (!ctx.write) throw new Error('This token is read-only')
-      const { data, error } = await admin.from('boards').insert({ title: String(a.title || 'Untitled board').slice(0, 200), owner_id: ctx.user }).select('id,title').single()
-      if (error) throw new Error(error.message)
+      const { data, error } = await admin.from('boards').insert({ title: (str(a.title, 200) || '').trim() || 'Untitled board', owner_id: ctx.user }).select('id,title').single()
+      if (error) throw dbError(error)
       return { id: data.id, title: data.title, url: `${APP_URL}/board/${data.id}` }
     },
   },
@@ -320,26 +346,29 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
       const existing = await loadItems(a.board_id)
       const byId = new Map(existing.map((i) => [i.id, i]))
       const changed: J[] = [], missing: string[] = []
-      for (const u of (a.updates || []) as J[]) {
+      if (!Array.isArray(a.updates) || a.updates.length > 500) throw new Error('updates must be a list of at most 500 entries')
+      for (const u of a.updates as J[]) {
+        if (!u || typeof u !== 'object') continue
         const it = byId.get(u.id)
         if (!it) { missing.push(u.id); continue }
         const n: J = { ...it }
-        for (const k of ['x', 'y', 'w', 'h']) if (typeof u[k] === 'number') n[k] = u[k]
-        if (typeof u.rotation === 'number') n.rot = u.rotation
+        for (const k of ['x', 'y']) if (typeof u[k] === 'number') n[k] = num(u[k], n[k])
+        for (const k of ['w', 'h']) if (typeof u[k] === 'number') n[k] = Math.max(1, num(u[k], n[k]))
+        if (typeof u.rotation === 'number') n.rot = num(u.rotation, 0) % 360
         if (typeof u.locked === 'boolean') n.locked = u.locked
         if (u.frame === null) n.parent = null
         else if (typeof u.frame === 'string' && byId.get(u.frame)?.type === 'frame') n.parent = u.frame
-        if (u.text != null) { if ('html' in n) n.html = html(u.text); else if (n.type === 'card' || n.type === 'frame') n.title = String(u.text); else if (n.type === 'connector') n.label = String(u.text); else if (n.type === 'code') n.code = String(u.text) }
-        if (u.title != null && (n.type === 'frame' || n.type === 'card' || n.type === 'chart' || n.type === 'embed')) n.title = String(u.title)
-        if (u.label != null && n.type === 'connector') n.label = String(u.label)
+        if (u.text != null) { if ('html' in n) n.html = html(u.text); else if (n.type === 'card' || n.type === 'frame') n.title = str(u.text, 300); else if (n.type === 'connector') n.label = str(u.text, 200); else if (n.type === 'code') n.code = str(u.text, 100000) }
+        if (u.title != null && (n.type === 'frame' || n.type === 'card' || n.type === 'chart' || n.type === 'embed')) n.title = str(u.title, 300)
+        if (u.label != null && n.type === 'connector') n.label = str(u.label, 200)
         if (u.color != null) { if (n.type === 'connector' || n.type === 'draw') n.stroke = color(u.color, n.stroke, true); else if (n.type === 'card') n.fill = color(u.color, n.fill, true); else n.fill = color(u.color, n.fill) }
         if (u.shape && n.type === 'shape' && SHAPES.includes(u.shape)) n.kind = u.shape
-        if (typeof u.font_size === 'number') n.fontSize = u.font_size
-        if (n.type === 'card') { if (u.description != null) n.desc = String(u.description); for (const k of ['status', 'assignee', 'due']) if (u[k] != null) n[k] = String(u[k]) }
-        if (Array.isArray(u.tags)) n.tags = u.tags.map(String)
+        if (typeof u.font_size === 'number') n.fontSize = Math.max(4, Math.min(400, num(u.font_size, 16)))
+        if (n.type === 'card') { if (u.description != null) n.desc = str(u.description, 4000); for (const k of ['status', 'assignee', 'due']) if (u[k] != null) n[k] = str(u[k], 80) }
+        if (Array.isArray(u.tags)) n.tags = strList(u.tags)
         if (n.type === 'table' && Array.isArray(u.rows)) { const t = build({ type: 'table', rows: u.rows, x: n.x, y: n.y }, ctx); Object.assign(n, { cells: t.cells, colW: t.colW, rowH: t.rowH, w: t.w, h: t.h }) }
-        if (n.type === 'code' && u.code != null) n.code = String(u.code)
-        if (n.type === 'comment') { if (typeof u.resolved === 'boolean') n.resolved = u.resolved; if (u.reply) n.thread = [...(n.thread || []), { id: crypto.randomUUID(), by: ctx.user, name: 'Agent', text: String(u.reply), at: Date.now() }] }
+        if (n.type === 'code' && u.code != null) n.code = str(u.code, 100000)
+        if (n.type === 'comment') { if (typeof u.resolved === 'boolean') n.resolved = u.resolved; if (u.reply) n.thread = [...(n.thread || []), { id: crypto.randomUUID(), by: ctx.user, name: 'Agent', text: (str(u.reply, 4000) || ''), at: Date.now() }] }
         n.rev = (it.rev || 0) + 1
         changed.push(n)
       }
@@ -385,6 +414,7 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
       await needWrite(ctx, a.board_id)
       const nodes = (a.nodes || []) as J[], edges = ((a.edges || []) as J[]).filter((e) => nodes.some((n) => n.id === e.from) && nodes.some((n) => n.id === e.to))
       if (!nodes.length) throw new Error('nodes must not be empty')
+      if (nodes.length > 300 || edges.length > 1000) throw new Error('At most 300 nodes and 1000 edges per diagram')
       // longest-path layering, then order each layer by the average position of its parents
       const layer = new Map<string, number>(nodes.map((n) => [n.id, 0]))
       for (let pass = 0; pass < nodes.length; pass++) { let moved = false; for (const e of edges) if (e.from !== e.to && layer.get(e.to)! < layer.get(e.from)! + 1 && layer.get(e.from)! + 1 <= nodes.length) { layer.set(e.to, layer.get(e.from)! + 1); moved = true } if (!moved) break }
@@ -451,6 +481,7 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
 const rpcError = (id: unknown, code: number, message: string) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message } })
 
 async function handle(msg: J, ctx: Ctx): Promise<J | null> {
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg) || typeof msg.method !== 'string') return rpcError(null, -32600, 'Invalid request')
   const { id, method, params } = msg
   if (id === undefined) return null // notification
   switch (method) {
@@ -479,11 +510,21 @@ Deno.serve(async (req) => {
   const json = (body: unknown, status = 200, extra: J = {}) => new Response(JSON.stringify(body), { status, headers: { ...CORS, 'Content-Type': 'application/json', ...extra } })
   if (req.method === 'DELETE') return new Response(null, { status: 200, headers: CORS })
   if (req.method !== 'POST') return json(rpcError(null, -32000, 'Use POST with a JSON-RPC body (MCP Streamable HTTP).'), 405, { Allow: 'POST, OPTIONS' })
-  const ctx = await authenticate(req)
-  if (!ctx) return json(rpcError(null, -32001, 'Missing or invalid token. Create one in White Canvas → Settings → Agent access and send it as "Authorization: Bearer wc_…".'), 401, { 'WWW-Authenticate': 'Bearer' })
+  if (Number(req.headers.get('content-length') || 0) > 2_000_000) return json(rpcError(null, -32600, 'Request is too large (2 MB limit)'), 413)
+  let ctx: Ctx | null
+  try { ctx = await authenticate(req) } catch (e) {
+    if (e instanceof RateLimited) return json(rpcError(null, -32002, 'Too many requests. Wait a minute and try again.'), 429, { 'Retry-After': '60' })
+    return json(rpcError(null, -32603, 'Server error'), 500)
+  }
+  if (!ctx) return json(rpcError(null, -32001, 'Missing, invalid or expired token. Create one in White Canvas → Settings → Agent access and send it as "Authorization: Bearer wc_…".'), 401, { 'WWW-Authenticate': 'Bearer' })
   let body: unknown
-  try { body = await req.json() } catch { return json(rpcError(null, -32700, 'Parse error'), 400) }
+  try {
+    const text = await req.text()
+    if (text.length > 2_000_000) return json(rpcError(null, -32600, 'Request is too large (2 MB limit)'), 413)
+    body = JSON.parse(text)
+  } catch { return json(rpcError(null, -32700, 'Parse error'), 400) }
   if (Array.isArray(body)) {
+    if (body.length > 20) return json(rpcError(null, -32600, 'At most 20 messages per batch'), 400)
     const out = (await Promise.all(body.map((m) => handle(m, ctx)))).filter(Boolean)
     return out.length ? json(out) : new Response(null, { status: 202, headers: CORS })
   }

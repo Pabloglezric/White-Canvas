@@ -329,3 +329,10 @@ export function orderedFrames(items = S().items) {
     .filter((i) => i.type === 'frame')
     .sort((a, b) => (Math.abs(a.y - b.y) > Math.min(a.h, b.h) * 0.5 ? a.y - b.y : a.x - b.x))
 }
+
+// Opt-in handle for automated tests and performance profiling (set localStorage "wc.debug" = "1").
+try {
+  if (typeof window !== 'undefined' && localStorage.getItem('wc.debug') === '1') {
+    ;(window as unknown as Record<string, unknown>).__wc = { useBoard, mutate, commit, apply, applyRemote, undo, redo, fitAll }
+  }
+} catch { /* storage unavailable */ }
