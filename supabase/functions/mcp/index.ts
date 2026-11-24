@@ -31,17 +31,11 @@ async function sha256(s: string) {
   return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('')
 }
 
-// Best-effort per-token rate limit (per function instance): 120 requests a minute.
+// Per-token rate limit, counted in the database so it holds across function instances: 120 requests a minute.
 class RateLimited extends Error {}
-const hits = new Map<string, number[]>()
-function allow(key: string): boolean {
-  const now = Date.now()
-  const list = (hits.get(key) || []).filter((t) => now - t < 60_000)
-  if (list.length >= 120) { hits.set(key, list); return false }
-  list.push(now)
-  hits.set(key, list)
-  if (hits.size > 5000) hits.clear()
-  return true
+async function allow(key: string): Promise<boolean> {
+  const { data, error } = await admin.rpc('rate_limit_hit', { k: `mcp:${key}`, max_hits: 120, window_seconds: 60 })
+  return error ? true : data !== false // never lock people out because the counter itself failed
 }
 
 /** Database errors stay in the logs; callers get a short, safe message. */
@@ -59,7 +53,7 @@ async function authenticate(req: Request): Promise<Ctx | null> {
   const { data } = await admin.from('api_tokens').select('id,user_id,can_write,expires_at').eq('token_hash', await sha256(m[1])).maybeSingle()
   if (!data) return null
   if (data.expires_at && new Date(data.expires_at).getTime() < Date.now()) return null
-  if (!allow(data.id)) throw new RateLimited()
+  if (!(await allow(data.id))) throw new RateLimited()
   admin.from('api_tokens').update({ last_used_at: new Date().toISOString() }).eq('id', data.id).then(() => {})
   return { user: data.user_id, write: data.can_write }
 }

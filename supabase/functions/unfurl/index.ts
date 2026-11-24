@@ -1,5 +1,7 @@
 // Link preview + "can this page be framed?" check for White Canvas embeds.
 // Called with the signed-in user's JWT (verify_jwt is on). Only public http(s) hosts are fetched.
+import { createClient } from 'npm:@supabase/supabase-js@2.119.2'
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
@@ -38,16 +40,11 @@ async function isPrivateHost(host: string): Promise<boolean> {
   return v4.some(isPrivateV4) || v6.some(isPrivateV6)
 }
 
-// Best-effort per-user rate limit (per function instance): 30 previews a minute.
-const hits = new Map<string, number[]>()
-function allow(key: string): boolean {
-  const now = Date.now()
-  const list = (hits.get(key) || []).filter((t) => now - t < 60_000)
-  if (list.length >= 30) { hits.set(key, list); return false }
-  list.push(now)
-  hits.set(key, list)
-  if (hits.size > 5000) hits.clear()
-  return true
+// Per-user rate limit, counted in the database so it holds across function instances: 30 previews a minute.
+const admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, { auth: { persistSession: false } })
+async function allow(key: string): Promise<boolean> {
+  const { data, error } = await admin.rpc('rate_limit_hit', { k: `unfurl:${key}`, max_hits: 30, window_seconds: 60 })
+  return error ? true : data !== false
 }
 
 /** The gateway has already verified the JWT signature; require a signed-in user rather than the public key. */
@@ -73,7 +70,7 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405)
   const uid = userId(req)
   if (!uid) return json({ error: 'Sign in required' }, 401)
-  if (!allow(uid)) return json({ error: 'Too many requests' }, 429)
+  if (!(await allow(uid))) return json({ error: 'Too many requests' }, 429)
   let target: URL
   try { target = new URL(String((await req.json()).url)) } catch { return json({ error: 'Invalid url' }, 400) }
   if (!/^https?:$/.test(target.protocol) || target.username || target.password || (await isPrivateHost(target.hostname))) return json({ error: 'Unsupported address' }, 400)
