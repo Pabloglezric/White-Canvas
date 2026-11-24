@@ -9,7 +9,9 @@ import { center, connectorGeom, distToSegment, rotatePt } from './geometry'
 import type { Camera, ConnectorItem, DrawItem, Item, Pt } from './types'
 
 /** Above this many visible items the board switches from DOM to the overview canvas. */
-export const DOM_ITEM_LIMIT = 1200
+export const DOM_ITEM_LIMIT = 600
+/** Going back to DOM needs clearly fewer items, so the two renderers do not flip back and forth while zooming. */
+export const DOM_ITEM_RESUME = 460
 
 export const DEFAULT_INK = '#1c1e23'
 /** Default-coloured ink and text follow the theme so they stay readable on a dark canvas. */

@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { aabb, connectorGeom, intersects, itemBox, toScreen, unionBoxes } from './geometry'
-import { DOM_ITEM_LIMIT, paintOverview, setThumbListener } from './overview'
+import { DOM_ITEM_LIMIT, DOM_ITEM_RESUME, paintOverview, setThumbListener } from './overview'
 import { Interaction } from './interaction'
 import { ItemView } from './items/ItemView'
 import { S, animateCamera, canEdit, useBoard } from './store'
@@ -31,7 +31,7 @@ function computeVisible(): { dom: string[]; overview: string[] | null; lost: boo
   let hasContent = any
   if (!any) for (const id in items) { if (items[id].type !== 'comment') { hasContent = true; break } }
   const pinned = (id: string) => id === editingId || (selection.length === 1 && selection[0] === id)
-  if (list.length > DOM_ITEM_LIMIT) {
+  if (list.length > (view.overview ? DOM_ITEM_RESUME : DOM_ITEM_LIMIT)) {
     // Crowded view: paint everything on one canvas, keep only the item being worked on (and a few pins) in the DOM.
     list = collect(0.02).sort(order)
     const dom: string[] = []
@@ -106,17 +106,11 @@ export function Canvas() {
   useEffect(() => {
     const el = viewRef.current!, world = worldRef.current!
     let lastZ = -1
-    let settle = 0
     const applyCam = () => {
       const { camera: c, grid: g } = S()
       world.style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.z})`
       if (c.z !== lastZ) {
-        // While zooming, let the GPU scale the existing layer; re-rasterise crisply once the gesture settles.
-        if (lastZ !== -1) {
-          world.classList.add('is-zooming')
-          clearTimeout(settle)
-          settle = window.setTimeout(() => world.classList.remove('is-zooming'), 180)
-        }
+        // the inverse scale (used by frame titles and comment pins) only changes with zoom, never while panning
         lastZ = c.z
         world.style.setProperty('--inv', String(1 / c.z))
       }
@@ -154,7 +148,7 @@ export function Canvas() {
       if (Math.abs(dy) > 2) animateCamera({ x: s.camera.x, y: s.camera.y + dy, z: s.camera.z }, 180)
     }
     const unsubReveal = useBoard.subscribe((s, p) => { if (s.editingId && (s.editingId !== p.editingId || s.viewport !== p.viewport)) requestAnimationFrame(reveal) })
-    return () => { unsub(); unsubReveal(); ro.disconnect(); ix.destroy(); clearTimeout(settle) }
+    return () => { unsub(); unsubReveal(); ro.disconnect(); ix.destroy() }
   }, [])
 
   return (

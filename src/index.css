@@ -75,8 +75,6 @@ input, textarea, select { font: inherit; color: inherit; }
 .wc-viewport.tool-eraser { cursor: cell; }
 .wc-viewport.tool-comment { cursor: copy; }
 .wc-world { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; --inv: 1; }
-/* while a zoom gesture is in flight the GPU scales the existing layer; it is re-rasterised sharply when the gesture settles */
-.wc-world.is-zooming { will-change: transform; }
 .wc-item { position: absolute; left: 0; top: 0; transform-origin: 50% 50%; contain: layout style; color: #1c1e23; }
 .wc-item.is-pass { pointer-events: none; }
 .wc-item.is-pass .wc-rich[data-editing="true"], .wc-item.is-pass input { pointer-events: auto; }
