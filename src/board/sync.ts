@@ -231,6 +231,12 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     const base: Peer = cur || { id, user: '', name: 'Guest', color: '#888', seen: Date.now() }
     useBoard.setState({ peers: { ...peers(), [id]: { ...base, ...patch } } })
   }
+  const dropPeer = (id: string) => {
+    if (!peers()[id]) return
+    const next = { ...peers() }
+    delete next[id]
+    useBoard.setState({ peers: next, following: S().following === id ? null : S().following })
+  }
   try { await supabase.realtime.setAuth() } catch { /* not signed in */ }
   if (stale()) return
 
@@ -239,23 +245,29 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     .on('presence', { event: 'sync' }, () => {
       const state = presence.presenceState() as Record<string, { user: string; name: string; color: string }[]>
       const next: Record<string, Peer> = {}
+      const now = Date.now()
+      // keep peers we heard from recently even if a presence update was missed
+      for (const key in peers()) if (now - peers()[key].seen < 30000) next[key] = peers()[key]
       for (const key in state) {
         if (key === myClient) continue
         const p = state[key][0]
-        next[key] = { ...(peers()[key] || { id: key, seen: Date.now() }), id: key, user: p.user, name: p.name, color: p.color } as Peer
+        next[key] = { ...(peers()[key] || { id: key, seen: now }), id: key, user: p.user, name: p.name, color: p.color } as Peer
       }
       const following = S().following
       useBoard.setState({ peers: next, following: following && next[following] ? following : null })
     })
     .on('broadcast', { event: 'cursor' }, ({ payload }) => {
-      const p = payload as { c: string; x?: number; y?: number; sel?: string[]; cam?: Peer['cam'] }
-      setPeer(p.c, { cursor: p.x == null ? null : { x: p.x, y: p.y! }, sel: p.sel, cam: p.cam, seen: Date.now() })
-      if (S().following === p.c && p.cam) {
-        const v = S().viewport
-        fitBox({ x: -p.cam.x / p.cam.z, y: -p.cam.y / p.cam.z, w: p.cam.vw / p.cam.z, h: p.cam.vh / p.cam.z }, 0, false, 8)
-        void v
-      }
+      const p = payload as { c: string; n?: string; col?: string; u?: string; x?: number; y?: number; sel?: string[]; cam?: Peer['cam'] }
+      const known = !!peers()[p.c]
+      const patch: Partial<Peer> = { sel: p.sel, seen: Date.now() }
+      if (p.n) { patch.name = p.n; patch.color = p.col; patch.user = p.u }
+      if (p.x != null) patch.cursor = { x: p.x, y: p.y! }
+      if (p.cam) patch.cam = p.cam
+      setPeer(p.c, patch)
+      if (!known && p.n) hello()
+      if (S().following === p.c && p.cam) fitBox({ x: -p.cam.x / p.cam.z, y: -p.cam.y / p.cam.z, w: p.cam.vw / p.cam.z, h: p.cam.vh / p.cam.z }, 0, false, 8)
     })
+    .on('broadcast', { event: 'bye' }, ({ payload }) => dropPeer((payload as { c: string }).c))
     .on('broadcast', { event: 'summon' }, ({ payload }) => {
       const p = payload as { name: string; box: { x: number; y: number; w: number; h: number } }
       fitBox(p.box, 0, true, 8)
@@ -265,7 +277,7 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       window.dispatchEvent(new CustomEvent('wc-react', { detail: payload }))
     })
     .subscribe((status) => {
-      if (status === 'SUBSCRIBED') presence.track({ user: me.id, name: me.name, color: me.color })
+      if (status === 'SUBSCRIBED') { presence.track({ user: me.id, name: me.name, color: me.color }); hello() }
     })
   channels.presence = presence
 
@@ -297,14 +309,26 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   channels.db = db
 
   let lastCam = 0
-  const sendCursor = throttle((p: Pt | null) => {
+  const cursorPayload = (p: Pt | null, full: boolean) => {
     const s = S()
     const now = Date.now()
     const payload: Record<string, unknown> = { c: myClient, sel: s.selection.slice(0, 30) }
+    if (full) Object.assign(payload, { n: me.name, col: me.color, u: me.id })
     if (p) { payload.x = Math.round(p.x); payload.y = Math.round(p.y) }
-    if (now - lastCam > 200) { lastCam = now; payload.cam = { ...s.camera, vw: s.viewport.w, vh: s.viewport.h } }
-    presence.send({ type: 'broadcast', event: 'cursor', payload })
-  }, 60)
+    if (full || now - lastCam > 200) { lastCam = now; payload.cam = { ...s.camera, vw: s.viewport.w, vh: s.viewport.h } }
+    return payload
+  }
+  // Announce ourselves over broadcast too: presence updates alone can be missed.
+  function hello() { presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(null, true) }) }
+  const sendCursor = throttle((p: Pt | null) => { presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(p, false) }) }, 60)
+  const heartbeat = setInterval(() => {
+    hello()
+    const now = Date.now()
+    const state = presence.presenceState()
+    for (const key in peers()) if (now - peers()[key].seen > 35000 && !state[key]) dropPeer(key)
+  }, 10000)
+  const onLeave = () => { presence.send({ type: 'broadcast', event: 'bye', payload: { c: myClient } }) }
+  window.addEventListener('pagehide', onLeave)
   bus.cursor = (p) => { if (Object.keys(peers()).length) sendCursor(p) }
   const unsubSel = useBoard.subscribe((s, p) => {
     if ((s.selection !== p.selection || s.camera !== p.camera) && Object.keys(s.peers).length) sendCursor(null)
@@ -324,8 +348,10 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       document.removeEventListener('visibilitychange', onHide)
       clearTimeout(retry)
       unsubCam(); unsubSel()
+      clearInterval(heartbeat); window.removeEventListener('pagehide', onLeave); onLeave()
       hooks.onCommit = undefined; hooks.onLive = undefined; bus.cursor = undefined
-      for (const ch of [presence, ops, db]) supabase.removeChannel(ch)
+      for (const ch of [ops, db]) supabase.removeChannel(ch)
+      setTimeout(() => supabase.removeChannel(presence), 400) // let the goodbye message leave first
       channels.presence = channels.ops = channels.db = undefined
     },
   }

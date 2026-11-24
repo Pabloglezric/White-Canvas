@@ -823,9 +823,15 @@ export class Interaction {
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key
     if (s.editingId) {
       // Keys that arrive before the editor has focus still belong to the text being edited.
-      const el = document.querySelector<HTMLElement>('[data-editing="true"][data-rich]')
-      if (el && e.key.length === 1 && !mod) { e.preventDefault(); el.focus(); document.execCommand('insertText', false, e.key) }
-      else if (k === 'Escape') finishEditing()
+      if (e.key.length === 1 && !mod) {
+        const ch = e.key
+        const put = () => {
+          const el = document.querySelector<HTMLElement>('[data-editing="true"][data-rich]')
+          if (el) { el.focus(); document.execCommand('insertText', false, ch) }
+        }
+        if (document.querySelector('[data-editing="true"][data-rich]')) { e.preventDefault(); put() }
+        else if (document.querySelector('[data-id="' + s.editingId + '"] [data-rich]')) { e.preventDefault(); requestAnimationFrame(put) }
+      } else if (k === 'Escape') finishEditing()
       return
     }
 

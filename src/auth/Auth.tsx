@@ -19,6 +19,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(hasSupabase)
   const [profile, setProfile] = useState<{ display_name: string; color: string } | null>(null)
+  const [profileFor, setProfileFor] = useState<string | null>(null)
 
   useEffect(() => {
     if (!hasSupabase) return
@@ -29,9 +30,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const userId = session?.user.id
   const refreshProfile = async () => {
-    if (!userId) { setProfile(null); return }
-    const { data } = await supabase.from('profiles').select('display_name,color').eq('id', userId).maybeSingle()
-    if (data) setProfile(data)
+    if (!userId) { setProfile(null); setProfileFor(null); return }
+    try {
+      const { data } = await supabase.from('profiles').select('display_name,color').eq('id', userId).maybeSingle()
+      if (data) setProfile(data)
+    } finally { setProfileFor(userId) }
   }
   useEffect(() => { refreshProfile() }, [userId]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -41,5 +44,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { id: session.user.id, name: profile?.display_name || email.split('@')[0] || 'Me', color: profile?.color && profile.color !== '#2f6fed' ? profile.color : colorFor(session.user.id), email, signedIn: true }
   }, [session, profile])
 
-  return <Ctx.Provider value={{ me, session, loading, refreshProfile }}>{children}</Ctx.Provider>
+  // wait for the profile too, so boards open with the right display name
+  const busy = loading || (!!userId && profileFor !== userId)
+  return <Ctx.Provider value={{ me, session, loading: busy, refreshProfile }}>{children}</Ctx.Provider>
 }
