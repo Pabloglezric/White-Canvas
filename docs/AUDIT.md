@@ -27,11 +27,22 @@ Benchmark on the production build, headless Chromium, software rendering. Frame 
 | Zoom with 1,000 items on screen (median frame) | 24.1 ms | 16.7 ms |
 | Pan / drag at 100% zoom, 10,000-item board (95th percentile) | 18.0 / 17.2 ms | 17.5 / 16.9 ms |
 
-Lighthouse on the live site before the fixes: performance 100, best practices 100, accessibility 80, SEO 91. First contentful paint 0.8 s on the mobile profile, initial transfer 206 KB.
+Lighthouse on the live site (mobile / desktop profile):
+
+| Category | Before | After |
+| --- | --- | --- |
+| Performance | 100 / 100 | 99 / 100 |
+| Accessibility | 80 / 80 | 100 / 100 |
+| Best practices | 100 / 100 | 100 / 100 |
+| SEO | 91 / 91 | 100 / 100 |
+
+First contentful paint is 0.8 s on the mobile profile and 0.2 s on desktop; the initial transfer is about 228 KB.
 
 Database: a 1,000-row page of one board through row-level security takes about 21 ms. The page query previously scanned the primary key of the whole table (cost grows with every board in the system); it now uses an index scoped to the board.
 
 Automated tests added: 56 unit tests and 19 end-to-end tests, run in CI on every push.
+
+Verified against the live backend after the fixes, with two temporary accounts (since removed): live sync in both directions, in-progress text reaching the server before editing ends, a commenter refused on every edit and comment-rewrite attempt, access removal closing an open board and wiping its local copy, profile privacy, sign-out purging local data, the link-preview function refusing nine internal-address variants and the public key, expired agent tokens refused, and both rate limits (exactly 120 and 30 requests allowed per minute).
 
 ## Launch blockers found and fixed
 
