@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { aabb, connectorGeom, intersects, itemBox, toScreen, unionBoxes } from './geometry'
+import { DOM_ITEM_LIMIT, paintOverview, setThumbListener } from './overview'
 import { Interaction } from './interaction'
 import { ItemView } from './items/ItemView'
 import { S, canEdit, useBoard } from './store'
@@ -7,60 +8,116 @@ import type { Item } from './types'
 
 const LAYER: Record<string, number> = { frame: 0, comment: 2 }
 
-function computeVisible(): string[] {
+/** What is currently drawn: DOM item ids, and (for crowded views) the ids painted on the overview canvas. */
+export const view: { dom: string[]; overview: string[] | null } = { dom: [], overview: null }
+
+function computeVisible(): { dom: string[]; overview: string[] | null; lost: boolean } {
   const { items, camera, viewport, showComments, editingId, selection } = S()
-  const mx = viewport.w * 0.35 / camera.z, my = viewport.h * 0.35 / camera.z
-  const view = { x: -camera.x / camera.z - mx, y: -camera.y / camera.z - my, w: viewport.w / camera.z + mx * 2, h: viewport.h / camera.z + my * 2 }
-  const out: Item[] = []
-  for (const id in items) {
-    const it = items[id]
-    if (it.type === 'comment' && (!showComments || it.resolved)) continue
-    if (id === editingId || intersects(view, itemBox(it, items)) || (selection.length === 1 && selection[0] === id)) out.push(it)
+  const z = camera.z
+  const collect = (margin: number) => {
+    const mx = (viewport.w * margin) / z, my = (viewport.h * margin) / z
+    const box = { x: -camera.x / z - mx, y: -camera.y / z - my, w: viewport.w / z + mx * 2, h: viewport.h / z + my * 2 }
+    const out: Item[] = []
+    for (const id in items) {
+      const it = items[id]
+      if (it.type === 'comment' && (!showComments || it.resolved)) continue
+      if (intersects(box, itemBox(it, items))) out.push(it)
+    }
+    return out
   }
-  out.sort((a, b) => (LAYER[a.type] ?? 1) - (LAYER[b.type] ?? 1) || a.z - b.z || (a.id < b.id ? -1 : 1))
-  return out.map((i) => i.id)
+  const order = (a: Item, b: Item) => (LAYER[a.type] ?? 1) - (LAYER[b.type] ?? 1) || a.z - b.z || (a.id < b.id ? -1 : 1)
+  let list = collect(0.35)
+  const any = list.length > 0
+  let hasContent = any
+  if (!any) for (const id in items) { if (items[id].type !== 'comment') { hasContent = true; break } }
+  const pinned = (id: string) => id === editingId || (selection.length === 1 && selection[0] === id)
+  if (list.length > DOM_ITEM_LIMIT) {
+    // Crowded view: paint everything on one canvas, keep only the item being worked on (and a few pins) in the DOM.
+    list = collect(0.02).sort(order)
+    const dom: string[] = []
+    let pins = 0
+    for (const it of list) if (pinned(it.id) || (it.type === 'comment' && pins++ < 150)) dom.push(it.id)
+    for (const id of [editingId, selection.length === 1 ? selection[0] : null]) if (id && items[id] && !dom.includes(id)) dom.push(id)
+    return { dom, overview: list.filter((it) => !pinned(it.id)).map((it) => it.id), lost: false }
+  }
+  const ids = new Set(list.map((i) => i.id))
+  for (const id of [editingId, selection.length === 1 ? selection[0] : null]) if (id && items[id] && !ids.has(id)) list.push(items[id])
+  list.sort(order)
+  return { dom: list.map((i) => i.id), overview: null, lost: hasContent && !any }
 }
 
-function useVisibleIds(): string[] {
-  const [ids, setIds] = useState<string[]>(computeVisible)
+const sameIds = (a: string[], b: string[]) => a.length === b.length && a.every((id, i) => id === b[i])
+
+/** Keeps the visible set, the overview canvas and the "lost" flag in step with the store, once per frame. */
+function useScene(canvasRef: React.RefObject<HTMLCanvasElement | null>): string[] {
+  const [ids, setIds] = useState<string[]>(() => computeVisible().dom)
   useEffect(() => {
     let raf = 0
     let prev = ids
+    const sizeCanvas = () => {
+      const c = canvasRef.current
+      if (!c) return
+      const { viewport } = S()
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      const w = Math.round(viewport.w * dpr), h = Math.round(viewport.h * dpr)
+      if (c.width !== w || c.height !== h) { c.width = w; c.height = h }
+    }
     const run = () => {
       raf = 0
       const next = computeVisible()
-      if (next.length === prev.length && next.every((id, i) => id === prev[i])) return
-      prev = next
-      setIds(next)
+      view.dom = next.dom
+      view.overview = next.overview
+      const c = canvasRef.current
+      if (c) {
+        if (next.overview) { sizeCanvas(); paintOverview(c, S().items, next.overview, S().camera, S().theme === 'dark') }
+        else if (c.dataset.on === '1') c.getContext('2d')?.clearRect(0, 0, c.width, c.height)
+        c.dataset.on = next.overview ? '1' : '0'
+      }
+      const s = S()
+      if (s.overview !== !!next.overview || s.lost !== next.lost) useBoard.setState({ overview: !!next.overview, lost: next.lost })
+      if (!sameIds(next.dom, prev)) { prev = next.dom; setIds(next.dom) }
     }
     const schedule = () => { if (!raf) raf = requestAnimationFrame(run) }
     const unsub = useBoard.subscribe((s, p) => {
-      if (s.items !== p.items || s.camera !== p.camera || s.viewport !== p.viewport || s.showComments !== p.showComments || s.editingId !== p.editingId || s.selection !== p.selection) schedule()
+      if (s.items !== p.items || s.camera !== p.camera || s.viewport !== p.viewport || s.showComments !== p.showComments || s.editingId !== p.editingId || s.selection !== p.selection || s.theme !== p.theme) schedule()
     })
+    setThumbListener(schedule)
     schedule()
-    return () => { unsub(); cancelAnimationFrame(raf) }
+    return () => { unsub(); setThumbListener(null); cancelAnimationFrame(raf); view.dom = []; view.overview = null }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
   return ids
 }
 
-const Items = memo(function Items() {
-  const ids = useVisibleIds()
+const Items = memo(function Items({ ids }: { ids: string[] }) {
   return <>{ids.map((id) => <ItemView key={id} id={id} />)}</>
 })
 
 export function Canvas() {
   const viewRef = useRef<HTMLDivElement>(null)
   const worldRef = useRef<HTMLDivElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
   const tool = useBoard((s) => s.tool)
   const grid = useBoard((s) => s.grid)
   const presenting = useBoard((s) => s.presenting != null)
+  const ids = useScene(canvasRef)
 
   useEffect(() => {
     const el = viewRef.current!, world = worldRef.current!
+    let lastZ = -1
+    let settle = 0
     const applyCam = () => {
       const { camera: c, grid: g } = S()
       world.style.transform = `translate(${c.x}px, ${c.y}px) scale(${c.z})`
-      world.style.setProperty('--inv', String(1 / c.z))
+      if (c.z !== lastZ) {
+        // While zooming, let the GPU scale the existing layer; re-rasterise crisply once the gesture settles.
+        if (lastZ !== -1) {
+          world.classList.add('is-zooming')
+          clearTimeout(settle)
+          settle = window.setTimeout(() => world.classList.remove('is-zooming'), 180)
+        }
+        lastZ = c.z
+        world.style.setProperty('--inv', String(1 / c.z))
+      }
       if (g !== 'none') {
         let step = 24 * c.z
         while (step < 14) step *= 4
@@ -70,23 +127,24 @@ export function Canvas() {
       }
     }
     const unsub = useBoard.subscribe((s, p) => { if (s.camera !== p.camera || s.grid !== p.grid) applyCam() })
-    const ro = new ResizeObserver(() => {
+    const measure = () => {
       const r = el.getBoundingClientRect()
       const v = S().viewport
-      if (Math.abs(v.w - r.width) > 0.5 || Math.abs(v.h - r.height) > 0.5) useBoard.setState({ viewport: { w: r.width, h: r.height } })
-    })
+      if (r.width > 0 && r.height > 0 && (Math.abs(v.w - r.width) > 0.5 || Math.abs(v.h - r.height) > 0.5)) useBoard.setState({ viewport: { w: r.width, h: r.height } })
+    }
+    const ro = new ResizeObserver(measure)
     ro.observe(el)
-    const r = el.getBoundingClientRect()
-    useBoard.setState({ viewport: { w: r.width, h: r.height } })
+    measure()
     applyCam()
     const ix = new Interaction(el)
-    return () => { unsub(); ro.disconnect(); ix.destroy() }
+    return () => { unsub(); ro.disconnect(); ix.destroy(); clearTimeout(settle) }
   }, [])
 
   return (
     <div ref={viewRef} className={`wc-viewport tool-${tool} grid-${grid} ${presenting ? 'is-presenting' : ''}`} data-canvas>
+      <canvas ref={canvasRef} className="wc-overview" aria-hidden="true" />
       <div ref={worldRef} className="wc-world">
-        <Items />
+        <Items ids={ids} />
         <svg className="wc-svg wc-live" width={1} height={1}><path id="wc-live-ink" /></svg>
       </div>
       <Overlay />

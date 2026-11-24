@@ -1,5 +1,3 @@
-import DOMPurify from 'dompurify'
-
 export const uid = (): string =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID()
@@ -19,19 +17,14 @@ export function textToHtml(s: string): string {
   return escapeHtml(s).replace(/\n/g, '<br>')
 }
 
+let parser: DOMParser | null = null
+/** Plain text of an HTML fragment. Parsed in an inert document, so nothing in it can load or run. */
 export function htmlToText(html: string): string {
   if (!html) return ''
-  const d = document.createElement('div')
-  d.innerHTML = html.replace(/<br\s*\/?>/gi, '\n').replace(/<\/(div|p|li)>/gi, '\n')
-  return (d.textContent || '').replace(/\n+$/, '')
-}
-
-const ALLOWED = ['b', 'strong', 'i', 'em', 'u', 's', 'strike', 'br', 'div', 'p', 'span', 'ul', 'ol', 'li', 'a', 'code', 'mark', 'font']
-export function sanitize(html: string): string {
-  return DOMPurify.sanitize(html || '', {
-    ALLOWED_TAGS: ALLOWED,
-    ALLOWED_ATTR: ['href', 'target', 'rel', 'style', 'color'],
-  })
+  if (!html.includes('<') && !html.includes('&')) return html
+  parser ||= new DOMParser()
+  const doc = parser.parseFromString(html.replace(/<br\s*\/?>/gi, '\n').replace(/<\/(div|p|li)>/gi, '\n'), 'text/html')
+  return (doc.body.textContent || '').replace(/\n+$/, '')
 }
 
 export function debounce<T extends (...a: any[]) => void>(fn: T, ms: number) {
@@ -124,4 +117,9 @@ export function colorFor(id: string): string {
   let h = 0
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0
   return USER_COLORS[h % USER_COLORS.length]
+}
+
+/** Escapes a value for use inside a double-quoted XML/HTML attribute or as text. */
+export function escapeAttr(v: unknown): string {
+  return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }

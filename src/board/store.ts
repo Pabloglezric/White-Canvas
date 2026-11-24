@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
 import { clamp, uid } from '../lib/util'
 import { itemBox, unionBoxes, type Guide } from './geometry'
+import { normalizeItem } from './validate'
 import type { BoardMeta, Box, Camera, Item, Peer, Role, Route, ShapeKind, Tool } from './types'
 
 export type Patch = Record<string, Item | null>
@@ -60,6 +61,8 @@ export interface BoardState extends Prefs {
   panel: PanelId
   activeComment: string | null
   presenting: number | null // index into ordered frames
+  overview: boolean // true while the board is drawn by the overview canvas instead of DOM
+  lost: boolean // content exists but none of it is on screen
   undo: HistoryEntry[]
   redo: HistoryEntry[]
   toast: { id: number; text: string } | null
@@ -95,6 +98,8 @@ export const useBoard = create<BoardState>()(
     panel: null,
     activeComment: null,
     presenting: null,
+    overview: false,
+    lost: false,
     undo: [],
     redo: [],
     toast: null,
@@ -107,7 +112,11 @@ export const useBoard = create<BoardState>()(
     },
     setTool: (t, lock) => set((s) => ({ tool: t, toolLock: lock ?? (t === s.tool ? s.toolLock : false), editingId: null })),
     select: (ids) => set({ selection: ids }),
-    setCamera: (c) => set({ camera: { x: c.x, y: c.y, z: clamp(c.z, MIN_ZOOM, MAX_ZOOM) } }),
+    setCamera: (c) => {
+      // a non-finite camera would poison every later coordinate, so it never gets in
+      if (!Number.isFinite(c.x) || !Number.isFinite(c.y) || !Number.isFinite(c.z) || c.z <= 0) return
+      set({ camera: { x: clamp(c.x, -1e9, 1e9), y: clamp(c.y, -1e9, 1e9), z: clamp(c.z, MIN_ZOOM, MAX_ZOOM) } })
+    },
   })),
 )
 
@@ -138,9 +147,16 @@ export function mutate(patch: Patch) {
   const s = S()
   const items = { ...s.items }
   const live: Item[] = []
+  const editor = s.role === 'owner' || s.role === 'editor'
   for (const id in patch) {
-    if (!pending.has(id)) pending.set(id, s.items[id] ?? null)
     const v = patch[id]
+    // People without edit rights can only touch comments; anything else would be rejected by the server.
+    if (!editor) {
+      const kind = (v ?? s.items[id])?.type
+      if (s.role === 'viewer' || kind !== 'comment') continue
+    }
+    if (v && !(Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.w) && Number.isFinite(v.h))) continue
+    if (!pending.has(id)) pending.set(id, s.items[id] ?? null)
     if (v === null) delete items[id]
     else { items[id] = v; live.push(v) }
   }
@@ -231,7 +247,9 @@ export function applyRemote(upserts: Item[], removes: { id: string; rev: number 
   const s = S()
   let items: Record<string, Item> | null = null
   const gone: string[] = []
-  for (const it of upserts) {
+  for (const raw of upserts) {
+    const it = normalizeItem(raw)
+    if (!it) continue
     const local = s.items[it.id]
     const tomb = tombs.get(it.id)
     if (tomb != null && (it.rev || 0) <= tomb) continue
@@ -263,7 +281,7 @@ export function resetBoard(partial: Partial<BoardState>) {
   tombs.clear()
   useBoard.setState({
     items: {}, selection: [], editingId: null, tool: 'select', peers: {}, following: null, guides: [], marquee: null, connectHover: null, ctxMenu: null,
-    panel: null, activeComment: null, presenting: null, undo: [], redo: [], camera: { x: 0, y: 0, z: 1 }, ...partial,
+    panel: null, activeComment: null, presenting: null, overview: false, lost: false, undo: [], redo: [], camera: { x: 0, y: 0, z: 1 }, ...partial,
   })
 }
 
@@ -336,3 +354,9 @@ try {
     ;(window as unknown as Record<string, unknown>).__wc = { useBoard, mutate, commit, apply, applyRemote, undo, redo, fitAll }
   }
 } catch { /* storage unavailable */ }
+
+/** Updates only the stored revision of an item (the server is the final arbiter of revisions). */
+export function adoptRev(id: string, rev: number) {
+  const it = S().items[id]
+  if (it && rev > (it.rev || 0) && !pending.has(id)) useBoard.setState({ items: { ...S().items, [id]: { ...it, rev } as Item } })
+}

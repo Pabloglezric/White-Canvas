@@ -114,6 +114,7 @@ export interface FrameItem extends ItemBase {
 export interface ImageItem extends ItemBase {
   type: 'image'
   src: string // asset:<path> | data: | https:
+  thumb?: string // small preview used when the image is tiny on screen
   alt?: string
   nw?: number
   nh?: number
