@@ -19,6 +19,7 @@ const cacheKey = (id: string) => `wc.cache.${id}`
 const outboxKey = (id: string) => `wc.outbox.${id}`
 const localItemsKey = (id: string) => `wc.local.items.${id}`
 const camKey = (id: string) => `wc.cam.${id}`
+const roleKey = (id: string) => `wc.role.${id}`
 
 export async function localBoards(): Promise<BoardMeta[]> { return ((await get(LOCAL_LIST)) as BoardMeta[] | undefined) || [] }
 export async function saveLocalBoards(list: BoardMeta[]) { await set(LOCAL_LIST, list) }
@@ -115,6 +116,7 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
 
   let meta: BoardMeta | null = null
   let role: Role | null = null
+  let unreachable = false
   try {
     let res = await supabase.from('boards').select('*').eq('id', boardId).maybeSingle()
     if (!res.data) {
@@ -126,12 +128,26 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     if (meta) role = ((await supabase.rpc('board_role', { b: boardId })).data as Role | null) || null
   } catch (e) {
     if (stale()) return
-    if (cached?.length) { useBoard.setState({ syncState: 'offline', role: 'editor' }); toast('Offline — showing the last saved copy'); }
-    else { useBoard.setState({ status: 'error' }); unsubCam(); return }
+    unreachable = true
+    if (cached?.length) {
+      // No connection: keep working on the saved copy with the role we last had here.
+      let lastRole: Role = 'viewer'
+      try { lastRole = (localStorage.getItem(roleKey(boardId)) as Role) || 'viewer' } catch { /* ignore */ }
+      useBoard.setState({ syncState: 'offline', role: lastRole })
+      toast('Offline — showing the last saved copy')
+    } else { useBoard.setState({ status: 'error' }); unsubCam(); return }
   }
   if (stale()) return
-  if (!meta && !cached?.length) { useBoard.setState({ status: 'denied' }); unsubCam(); return }
-  if (meta) useBoard.setState({ meta: { ...meta, settings: meta.settings || {} }, role: role || 'viewer' })
+  if (!meta && !unreachable) {
+    // The server answered and we have no access (deleted, or sharing was turned off): drop any local copy.
+    del(cacheKey(boardId)).catch(() => {}); del(outboxKey(boardId)).catch(() => {})
+    try { localStorage.removeItem(roleKey(boardId)) } catch { /* ignore */ }
+    useBoard.setState({ status: 'denied', items: {} }); unsubCam(); return
+  }
+  if (meta) {
+    useBoard.setState({ meta: { ...meta, settings: meta.settings || {} }, role: role || 'viewer' })
+    try { localStorage.setItem(roleKey(boardId), role || 'viewer') } catch { /* ignore */ }
+  }
 
   // outbox: edits that never reached the server
   const dirty = new Map<string, Row>()

@@ -4,7 +4,8 @@ import { parseCsv, textToHtml } from '../lib/util'
 import { isLocalBoard, uploadAsset } from './assets'
 import { make } from './defaults'
 import { addItems, parseClipboardItems, pasteItems } from './ops'
-import { S, toast } from './store'
+import { aabb, intersects, unionBoxes } from './geometry'
+import { S, fitBox, toast, viewBox } from './store'
 import type { EmbedItem, Item, Pt } from './types'
 
 const IMG_EXT = /\.(png|jpe?g|gif|webp|avif|svg)(\?.*)?$/i
@@ -176,6 +177,11 @@ export async function importFiles(files: File[], at: Pt) {
   const boardId = S().boardId
   if (!boardId) return
   if (!isLocalBoard(boardId) && !navigator.onLine) { toast('You are offline — files upload when you reconnect. Try again then.'); return }
+  // If the drop point is already occupied, start to the right of everything instead of piling on top.
+  const taken = Object.values(S().items).filter((i) => i.type !== 'connector' && i.type !== 'frame' && i.type !== 'comment')
+  if (taken.some((i) => at.x + 300 > i.x && at.x - 40 < i.x + i.w && at.y + 200 > i.y && at.y - 200 < i.y + i.h)) {
+    at = { x: Math.max(...taken.map((i) => i.x + i.w)) + 120, y: at.y }
+  }
   let x = at.x
   const created: Item[] = []
   for (const file of files.slice(0, 30)) {
@@ -225,6 +231,8 @@ export async function importFiles(files: File[], at: Pt) {
   if (created.length) {
     // frames go underneath their pages
     addItems(created.sort((a, b) => (a.type === 'frame' ? -1 : 0) - (b.type === 'frame' ? -1 : 0)))
+    const box = unionBoxes(created.map((c) => aabb(c)))
+    if (box && !intersects(viewBox(), box)) fitBox(box, 80)
     toast(`Added ${created.filter((c) => c.type !== 'frame').length} item${created.length > 1 ? 's' : ''}`)
   }
 }
