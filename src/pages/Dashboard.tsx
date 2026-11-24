@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Copy, HardDrive, LogIn, MoreHorizontal, Pencil, Plus, RotateCcw, Search, Settings as Cog, Star, Trash2, Users } from 'lucide-react'
 import { useAuth } from '../auth/Auth'
+import { confirmDialog, promptDialog } from '../board/ui/dialogs'
 import { Pop } from '../board/ui/kit'
 import {
   createBoard, deleteBoard, duplicateBoard, leaveBoard, listCloudBoards, listLocalBoards, renameBoard, starBoard, trashBoard,
@@ -9,6 +10,12 @@ import {
 } from '../lib/boards'
 import { hasSupabase } from '../lib/supabase'
 import { initials, timeAgo } from '../lib/util'
+
+/** Stored previews are shown as an image, never as markup, so nothing inside one can run. */
+function thumbSrc(svg: string | null | undefined): string | null {
+  if (!svg || !svg.startsWith('<svg') || svg.length > 262144) return null
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+}
 
 export function Logo() {
   return (
@@ -69,7 +76,7 @@ export default function Dashboard() {
   const tabs: [Tab, string][] = [['all', 'All boards'], ['starred', 'Starred'], ['shared', 'Shared with me'], ['device', 'This device'], ['trash', 'Trash']]
 
   return (
-    <div className="wc-page">
+    <main className="wc-page">
       <div style={{ maxWidth: 1180, margin: '0 auto' }}>
         <header className="wc-row flex-wrap" style={{ gap: 12, marginBottom: 22 }}>
           <Logo />
@@ -86,7 +93,7 @@ export default function Dashboard() {
           <div className="flex-1" />
           <div className="relative" style={{ width: 'min(260px, 100%)' }}>
             <Search size={15} style={{ position: 'absolute', left: 11, top: 11, color: 'var(--ink-3)' }} />
-            <input className="wc-input" style={{ paddingLeft: 32 }} placeholder="Search boards" value={q} onChange={(e) => setQ(e.target.value)} />
+            <input className="wc-input" type="search" aria-label="Search boards" style={{ paddingLeft: 32 }} placeholder="Search boards" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
           {me.signedIn ? (
             <Pop placement="bottom" button={(_o, t) => (
@@ -129,8 +136,8 @@ export default function Dashboard() {
         ) : (
           <div className="wc-board-grid">
             {shown.map((b) => (
-              <div key={b.id} className="wc-board-card" role="link" tabIndex={0} onClick={() => !b.trashed_at && nav(`/board/${b.id}`)} onKeyDown={(e) => { if (e.key === 'Enter' && !b.trashed_at) nav(`/board/${b.id}`) }}>
-                <div className="wc-board-thumb" dangerouslySetInnerHTML={b.thumbnail?.startsWith('<svg') ? { __html: b.thumbnail } : undefined} />
+              <div key={b.id} className="wc-board-card" role="link" aria-label={`Open ${b.title}`} tabIndex={0} onClick={() => !b.trashed_at && nav(`/board/${b.id}`)} onKeyDown={(e) => { if (e.key === 'Enter' && !b.trashed_at) nav(`/board/${b.id}`) }}>
+                <div className="wc-board-thumb">{thumbSrc(b.thumbnail) && <img src={thumbSrc(b.thumbnail)!} alt="" loading="lazy" draggable={false} />}</div>
                 <div className="wc-row" style={{ padding: '9px 6px 9px 12px', gap: 4 }}>
                   <div className="min-w-0 flex-1">
                     <div className="truncate font-medium">{b.title}</div>
@@ -151,7 +158,7 @@ export default function Dashboard() {
                           {b.trashed_at ? (
                             <>
                               <button onClick={act(() => trashBoard(b, false))}><RotateCcw size={15} /> Restore</button>
-                              <button style={{ color: 'var(--danger)' }} onClick={() => { if (confirm(`Delete "${b.title}" forever? This cannot be undone.`)) act(() => deleteBoard(b))() }}><Trash2 size={15} /> Delete forever</button>
+                              <button style={{ color: 'var(--danger)' }} onClick={async () => { if (await confirmDialog({ title: 'Delete board forever?', message: `"${b.title}" and everything on it will be permanently removed. This cannot be undone.`, confirmLabel: 'Delete forever', danger: true })) act(() => deleteBoard(b))() }}><Trash2 size={15} /> Delete forever</button>
                             </>
                           ) : b.shared ? (
                             <>
@@ -160,7 +167,7 @@ export default function Dashboard() {
                             </>
                           ) : (
                             <>
-                              <button onClick={() => { const t = prompt('Board name', b.title); if (t?.trim()) act(() => renameBoard(b, t.trim()))() }}><Pencil size={15} /> Rename</button>
+                              <button onClick={async () => { const t = await promptDialog({ title: 'Rename board', label: 'Board name', value: b.title, confirmLabel: 'Rename' }); if (t) act(() => renameBoard(b, t))() }}><Pencil size={15} /> Rename</button>
                               <button onClick={act(() => duplicateBoard(b, !b.local))}><Copy size={15} /> Duplicate</button>
                               {b.local && me.signedIn && <button onClick={act(async () => nav(`/board/${await duplicateBoard(b, true)}`))}><Users size={15} /> Copy to cloud</button>}
                               <button onClick={act(() => trashBoard(b, true))}><Trash2 size={15} /> Move to trash</button>
@@ -176,6 +183,6 @@ export default function Dashboard() {
           </div>
         )}
       </div>
-    </div>
+    </main>
   )
 }

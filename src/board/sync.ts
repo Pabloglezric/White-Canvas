@@ -3,37 +3,53 @@
 // with an IndexedDB cache and outbox so edits survive flaky or missing connectivity.
 // Local boards ("local-…"): IndexedDB only.
 import type { RealtimeChannel } from '@supabase/supabase-js'
-import { del, get, set } from 'idb-keyval'
+import { del, get, keys, set } from 'idb-keyval'
 import { supabase } from '../lib/supabase'
 import { debounce, throttle } from '../lib/util'
-import { isLocalBoard } from './assets'
-import { bus } from './interaction'
-import { S, applyRemote, fitAll, fitBox, hooks, resetBoard, toast, useBoard } from './store'
+import { forgetAssets, isLocalBoard, releaseAssets } from './assets'
 import { thumbnailSvg } from './export'
+import { bus } from './interaction'
+import { finishEditing } from './items/RichText'
+import { S, adoptRev, applyRemote, fitAll, fitBox, hooks, isPending, replaceItem, resetBoard, toast, useBoard } from './store'
 import type { BoardMeta, BoardSettings, Camera, Item, Peer, Pt, Role } from './types'
+import { normalizeItem, normalizeItems } from './validate'
 
 interface Row { id: string; board_id: string; data: Item; rev: number; deleted: boolean; client_id: string }
 
 const LOCAL_LIST = 'wc.local.boards'
-const cacheKey = (id: string) => `wc.cache.${id}`
-const outboxKey = (id: string) => `wc.outbox.${id}`
+// Offline copies are kept per account, so two people sharing a device never see each other's boards.
+const cacheKey = (user: string, id: string) => `wc.cache.${user}.${id}`
+const outboxKey = (user: string, id: string) => `wc.outbox.${user}.${id}`
 const localItemsKey = (id: string) => `wc.local.items.${id}`
 const camKey = (id: string) => `wc.cam.${id}`
 const roleKey = (id: string) => `wc.role.${id}`
 
 export async function localBoards(): Promise<BoardMeta[]> { return ((await get(LOCAL_LIST)) as BoardMeta[] | undefined) || [] }
 export async function saveLocalBoards(list: BoardMeta[]) { await set(LOCAL_LIST, list) }
-export async function localItems(id: string): Promise<Item[]> { return ((await get(localItemsKey(id))) as Item[] | undefined) || [] }
+export async function localItems(id: string): Promise<Item[]> { return normalizeItems(await get(localItemsKey(id))) }
 export async function saveLocalItems(id: string, items: Item[]) { await set(localItemsKey(id), items) }
 export async function deleteLocalBoard(id: string) {
   await saveLocalBoards((await localBoards()).filter((b) => b.id !== id))
   await del(localItemsKey(id))
 }
 
+/** Removes everything this account cached on the device (called on sign-out). Device-only boards are kept. */
+export async function purgeAccountData(userId: string) {
+  try {
+    for (const k of await keys()) {
+      if (typeof k === 'string' && (k.startsWith(`wc.cache.${userId}.`) || k.startsWith(`wc.outbox.${userId}.`) || /^wc\.(cache|outbox)\.[0-9a-f-]{36}$/.test(k))) await del(k)
+    }
+  } catch { /* storage unavailable */ }
+  try {
+    for (const k of Object.keys(localStorage)) if (k === 'wc.boards.cache' || k.startsWith('wc.role.')) localStorage.removeItem(k)
+  } catch { /* ignore */ }
+  forgetAssets()
+}
+
 function restoreCamera(id: string) {
   try {
     const c = JSON.parse(localStorage.getItem(camKey(id)) || 'null') as Camera | null
-    if (c && Number.isFinite(c.x) && Number.isFinite(c.z)) { S().setCamera(c); return true }
+    if (c && Number.isFinite(c.x) && Number.isFinite(c.y) && Number.isFinite(c.z)) { S().setCamera(c); return true }
   } catch { /* ignore */ }
   return false
 }
@@ -49,6 +65,8 @@ async function fetchAllItems(boardId: string): Promise<Row[]> {
   }
   return out
 }
+
+const idle = (fn: () => void) => ('requestIdleCallback' in window ? requestIdleCallback(fn, { timeout: 4000 }) : setTimeout(fn, 200))
 
 let active: { id: string; close: () => void; flush: () => Promise<void> } | null = null
 export const flushNow = () => active?.flush() ?? Promise.resolve()
@@ -66,136 +84,200 @@ export async function updateMeta(patch: Partial<Pick<BoardMeta, 'title' | 'link_
   const body: Record<string, unknown> = { ...patch }
   if (patch.settings) body.settings = meta.settings
   const { error } = await supabase.from('boards').update(body).eq('id', s.boardId)
-  if (error) toast(`Could not save: ${error.message}`)
+  if (error) toast('Could not save that change. Check your connection and try again.')
 }
 
-export function broadcast(event: string, payload: Record<string, unknown>) {
-  channels.presence?.send({ type: 'broadcast', event, payload: { ...payload, c: S().clientId } })
-}
 const channels: { presence?: RealtimeChannel; ops?: RealtimeChannel; db?: RealtimeChannel } = {}
+/** Editors only: asks everyone on the board to look at a given area. */
+export function summon(name: string, box: { x: number; y: number; w: number; h: number }) {
+  channels.ops?.send({ type: 'broadcast', event: 'summon', payload: { c: S().clientId, name, box } })
+}
+
+// Fields that are large and change rarely: they travel on commit, not in every in-flight packet.
+const HEAVY = new Set(['pts', 'preview', 'thread'])
 
 export async function openBoard(boardId: string, me: { id: string; name: string; color: string }): Promise<void> {
   active?.close()
   active = null
   resetBoard({ boardId, status: 'loading', me, meta: null, role: 'viewer', syncState: isLocalBoard(boardId) ? 'local' : 'synced' })
   const stale = () => S().boardId !== boardId
-  const toMap = (list: Item[]) => { const m: Record<string, Item> = {}; for (const i of list) if (i && i.id) m[i.id] = i; return m }
+  const toMap = (list: Item[]) => { const m: Record<string, Item> = {}; for (const i of list) m[i.id] = i; return m }
   const ready = (items: Record<string, Item>) => {
     useBoard.setState({ items, status: 'ready' })
     if (!restoreCamera(boardId)) fitAll(false)
   }
   const saveCam = debounce(() => { try { localStorage.setItem(camKey(boardId), JSON.stringify(S().camera)) } catch { /* ignore */ } }, 500)
   const unsubCam = useBoard.subscribe((s, p) => { if (s.camera !== p.camera) saveCam() })
+  const unsubTitle = useBoard.subscribe((s, p) => { if (s.meta?.title !== p.meta?.title) document.title = s.meta?.title ? `${s.meta.title} · White Canvas` : 'White Canvas' })
+  const cleanupBase = () => { unsubCam(); unsubTitle(); document.title = 'White Canvas'; releaseAssets() }
 
   // ---------- local-only board ----------
   if (isLocalBoard(boardId)) {
     const list = await localBoards()
     const meta = list.find((b) => b.id === boardId)
-    if (stale()) return
-    if (!meta) { useBoard.setState({ status: 'denied' }); unsubCam(); return }
+    if (stale()) { cleanupBase(); return }
+    if (!meta) { useBoard.setState({ status: 'denied' }); cleanupBase(); return }
     useBoard.setState({ meta, role: 'owner' })
     ready(toMap(await localItems(boardId)))
-    const save = debounce(async () => {
+    const writeItems = () => { if (S().boardId === boardId) saveLocalItems(boardId, Object.values(S().items)).catch(() => {}) }
+    const writeMeta = () => idle(async () => {
       const s = S()
       if (s.boardId !== boardId) return
-      await saveLocalItems(boardId, Object.values(s.items))
       const all = await localBoards()
       await saveLocalBoards(all.map((b) => (b.id === boardId ? { ...b, title: s.meta?.title || b.title, settings: s.meta?.settings || b.settings, updated_at: new Date().toISOString(), thumbnail: thumbnailSvg(s.items) } : b)))
-    }, 400)
+    })
+    const save = debounce(() => { writeItems(); writeMeta() }, 400)
+    // text being typed is saved too, so closing the tab mid-sentence loses nothing
+    const saveLive = debounce(writeItems, 900)
+    const persistNow = () => { finishEditing(); save.cancel(); saveLive.cancel(); writeItems() }
+    const onHide = () => { if (document.visibilityState === 'hidden') persistNow() }
+    document.addEventListener('visibilitychange', onHide)
+    window.addEventListener('pagehide', persistNow)
     hooks.onCommit = () => save()
-    hooks.onLive = undefined
+    hooks.onLive = () => saveLive()
     bus.cursor = undefined
-    active = { id: boardId, close: () => { save.flush(); unsubCam(); hooks.onCommit = undefined }, flush: async () => { save.flush() } }
+    active = {
+      id: boardId,
+      flush: async () => { save.cancel(); writeItems() },
+      close: () => {
+        finishEditing()
+        save.cancel(); saveLive.cancel(); writeItems(); writeMeta()
+        document.removeEventListener('visibilitychange', onHide)
+        window.removeEventListener('pagehide', persistNow)
+        hooks.onCommit = undefined; hooks.onLive = undefined
+        cleanupBase()
+      },
+    }
     return
   }
 
   // ---------- cloud board ----------
-  const cached = (await get(cacheKey(boardId))) as Item[] | undefined
-  if (stale()) return
-  if (cached?.length) ready(toMap(cached))
+  const CACHE = cacheKey(me.id, boardId), OUTBOX = outboxKey(me.id, boardId)
+  const cachedRaw = (await get(CACHE)) as unknown
+  if (stale()) { cleanupBase(); return }
+  const cached = normalizeItems(cachedRaw)
+  if (cached.length) ready(toMap(cached))
 
   let meta: BoardMeta | null = null
   let role: Role | null = null
   let unreachable = false
   try {
     let res = await supabase.from('boards').select('*').eq('id', boardId).maybeSingle()
-    if (!res.data) {
+    if (!res.data && !res.error) {
       const joined = await supabase.rpc('join_board', { b: boardId })
+      if (joined.error) throw new Error(joined.error.message)
       if (joined.data) res = await supabase.from('boards').select('*').eq('id', boardId).maybeSingle()
     }
     if (res.error) throw new Error(res.error.message)
     meta = res.data as BoardMeta | null
-    if (meta) role = ((await supabase.rpc('board_role', { b: boardId })).data as Role | null) || null
-  } catch (e) {
-    if (stale()) return
+    if (meta) {
+      const r = await supabase.rpc('board_role', { b: boardId })
+      if (r.error) throw new Error(r.error.message)
+      role = (r.data as Role | null) || null
+    }
+  } catch {
+    if (stale()) { cleanupBase(); return }
     unreachable = true
-    if (cached?.length) {
+    if (cached.length) {
       // No connection: keep working on the saved copy with the role we last had here.
       let lastRole: Role = 'viewer'
       try { lastRole = (localStorage.getItem(roleKey(boardId)) as Role) || 'viewer' } catch { /* ignore */ }
       useBoard.setState({ syncState: 'offline', role: lastRole })
       toast('Offline — showing the last saved copy')
-    } else { useBoard.setState({ status: 'error' }); unsubCam(); return }
+    } else { useBoard.setState({ status: 'error' }); cleanupBase(); return }
   }
-  if (stale()) return
-  if (!meta && !unreachable) {
+  if (stale()) { cleanupBase(); return }
+  const lockOut = () => {
     // The server answered and we have no access (deleted, or sharing was turned off): drop any local copy.
-    del(cacheKey(boardId)).catch(() => {}); del(outboxKey(boardId)).catch(() => {})
+    del(CACHE).catch(() => {}); del(OUTBOX).catch(() => {})
     try { localStorage.removeItem(roleKey(boardId)) } catch { /* ignore */ }
-    useBoard.setState({ status: 'denied', items: {} }); unsubCam(); return
+    useBoard.setState({ status: 'denied', items: {}, selection: [], editingId: null })
   }
+  if (!unreachable && (!meta || !role)) { lockOut(); cleanupBase(); return }
   if (meta) {
     useBoard.setState({ meta: { ...meta, settings: meta.settings || {} }, role: role || 'viewer' })
+    document.title = `${meta.title} · White Canvas`
     try { localStorage.setItem(roleKey(boardId), role || 'viewer') } catch { /* ignore */ }
   }
 
   // outbox: edits that never reached the server
   const dirty = new Map<string, Row>()
-  const outbox = ((await get(outboxKey(boardId))) as Row[] | undefined) || []
+  const outboxRaw = ((await get(OUTBOX)) as Row[] | undefined) || []
+  const outbox: Row[] = []
+  for (const o of Array.isArray(outboxRaw) ? outboxRaw : []) {
+    const data = o && normalizeItem(o.data)
+    if (data) outbox.push({ id: data.id, board_id: boardId, data, rev: data.rev, deleted: !!o.deleted, client_id: S().clientId })
+  }
 
   if (meta) {
     try {
       const rows = await fetchAllItems(boardId)
-      if (stale()) return
+      if (stale()) { cleanupBase(); return }
       const items: Record<string, Item> = {}
-      for (const r of rows) items[r.id] = { ...r.data, id: r.id, rev: r.rev }
+      const serverRev = new Map<string, number>()
+      for (const r of rows) {
+        serverRev.set(r.id, r.rev)
+        const it = normalizeItem({ ...r.data, id: r.id, rev: r.rev })
+        if (it) items[r.id] = it
+      }
       for (const o of outbox) {
-        const remote = rows.find((r) => r.id === o.id)
-        if (remote && remote.rev > o.rev) continue
+        if ((serverRev.get(o.id) || 0) > o.rev) continue // the server moved on while we were away
         dirty.set(o.id, o)
         if (o.deleted) delete items[o.id]
-        else items[o.id] = { ...o.data, rev: o.rev }
+        else items[o.id] = o.data
       }
-      const hadCam = cached?.length
+      const hadView = cached.length > 0
       useBoard.setState({ items, status: 'ready' })
-      if (!hadCam && !restoreCamera(boardId)) fitAll(false)
+      if (!hadView && !restoreCamera(boardId)) fitAll(false)
     } catch {
-      if (!cached?.length) { useBoard.setState({ status: 'error' }); unsubCam(); return }
+      if (!cached.length) { useBoard.setState({ status: 'error' }); cleanupBase(); return }
       useBoard.setState({ syncState: 'offline' })
     }
   }
 
   // ---------- persistence ----------
-  const saveOutbox = debounce(() => { set(outboxKey(boardId), [...dirty.values()]).catch(() => {}) }, 250)
-  const saveCache = debounce(() => { if (S().boardId === boardId) set(cacheKey(boardId), Object.values(S().items)).catch(() => {}) }, 1500)
+  const saveOutbox = debounce(() => { set(OUTBOX, [...dirty.values()]).catch(() => {}) }, 250)
+  const saveCache = debounce(() => idle(() => { if (S().boardId === boardId) set(CACHE, Object.values(S().items)).catch(() => {}) }), 1500)
   let flushing = false
   let retry: ReturnType<typeof setTimeout> | undefined
+  // Errors that will never succeed on retry: no permission, or data the server refuses.
+  const permanent = (code?: string) => !!code && /^(42501|23\d{3}|22\d{3}|P0001)$/.test(code)
+
+  /** A change the server refused is undone locally (using the server's copy) instead of blocking every later save. */
+  const reject = async (row: Row) => {
+    dirty.delete(row.id)
+    const { data } = await supabase.from('board_items').select('id,data,rev,deleted').eq('id', row.id).maybeSingle()
+    const server = data && !data.deleted ? normalizeItem({ ...(data.data as Item), id: data.id, rev: data.rev }) : null
+    replaceItem(row.id, server)
+  }
 
   const flush = async () => {
     if (flushing || !dirty.size) return
     if (!navigator.onLine) { useBoard.setState({ syncState: 'offline' }); return }
     flushing = true
     useBoard.setState({ syncState: 'saving' })
+    let refused = 0
     try {
       while (dirty.size) {
         const batch = [...dirty.values()].slice(0, 150)
         const { error } = await supabase.from('board_items').upsert(batch, { onConflict: 'id' })
-        if (error) throw new Error(error.message)
+        if (error) {
+          if (!permanent(error.code)) throw new Error(error.message)
+          // find the rows at fault one by one; the rest still save
+          for (const row of batch) {
+            const one = await supabase.from('board_items').upsert(row, { onConflict: 'id' })
+            if (!one.error) { if (dirty.get(row.id)?.rev === row.rev) dirty.delete(row.id) }
+            else if (permanent(one.error.code)) { refused++; await reject(row) }
+            else throw new Error(one.error.message)
+          }
+          continue
+        }
         for (const r of batch) if (dirty.get(r.id)?.rev === r.rev) dirty.delete(r.id)
       }
       saveOutbox()
       useBoard.setState({ syncState: 'synced' })
-    } catch (e) {
+      if (refused) toast(refused === 1 ? 'One change could not be saved and was undone' : `${refused} changes could not be saved and were undone`)
+    } catch {
       useBoard.setState({ syncState: 'offline' })
       clearTimeout(retry)
       retry = setTimeout(flush, 5000)
@@ -205,33 +287,56 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   }
   const flushSoon = debounce(flush, 450)
   const onOnline = () => { flush() }
-  const onHide = () => { if (document.visibilityState === 'hidden') { flushSoon.flush(); saveCache.flush(); saveOutbox.flush() } }
+  const leave = () => { finishEditing(); flushSoon.flush(); saveOutbox.flush(); set(CACHE, Object.values(S().items)).catch(() => {}) }
+  const onHide = () => { if (document.visibilityState === 'hidden') leave(); else checkAccess() }
   window.addEventListener('online', onOnline)
+  window.addEventListener('pagehide', leave)
   document.addEventListener('visibilitychange', onHide)
 
-  const saveThumb = debounce(() => {
+  const saveThumb = debounce(() => idle(() => {
     const s = S()
     if (s.boardId !== boardId || (s.role !== 'owner' && s.role !== 'editor')) return
     supabase.from('boards').update({ thumbnail: thumbnailSvg(s.items) }).eq('id', boardId).then(() => {})
-  }, 8000)
+  }), 8000)
 
+  // ----- live updates: only what changed since the last packet -----
   const liveIds = new Set<string>()
+  const lastSent = new Map<string, Item>()
   const sendLive = throttle(() => {
     const { items } = S()
-    const list = [...liveIds].map((id) => items[id]).filter(Boolean)
+    const patches: Record<string, unknown>[] = []
+    for (const id of liveIds) {
+      const it = items[id] as (Item & Record<string, unknown>) | undefined
+      if (!it) continue
+      const prev = lastSent.get(id) as (Item & Record<string, unknown>) | undefined
+      const patch: Record<string, unknown> = { id, rev: it.rev }
+      if (!prev) patch.full = it
+      else for (const k in it) if (it[k] !== prev[k] && !HEAVY.has(k)) patch[k] = it[k]
+      lastSent.set(id, it)
+      if (Object.keys(patch).length > 2) patches.push(patch)
+    }
     liveIds.clear()
-    if (list.length && list.length <= 60) channels.ops?.send({ type: 'broadcast', event: 'live', payload: { c: S().clientId, items: list } })
+    if (patches.length && patches.length <= 80) channels.ops?.send({ type: 'broadcast', event: 'live', payload: { c: S().clientId, patches } })
   }, 60)
 
-  hooks.onLive = (changed) => { for (const it of changed) liveIds.add(it.id); sendLive() }
+  // Text being typed is checkpointed to the server after a pause, without touching local undo history.
+  const checkpoint = debounce(() => {
+    const s = S()
+    if (s.boardId !== boardId || !s.editingId) return
+    const it = s.items[s.editingId]
+    if (!it || !isPending(it.id) || (s.role !== 'owner' && s.role !== 'editor')) return
+    dirty.set(it.id, { id: it.id, board_id: boardId, data: it, rev: (it.rev || 0) + 1, deleted: false, client_id: s.clientId })
+    saveOutbox(); flushSoon()
+  }, 2500)
+
+  hooks.onLive = (changed) => { for (const it of changed) liveIds.add(it.id); sendLive(); checkpoint() }
   hooks.onCommit = (changed, removed) => {
     const clientId = S().clientId
-    for (const it of changed) dirty.set(it.id, { id: it.id, board_id: boardId, data: it, rev: it.rev, deleted: false, client_id: clientId })
-    for (const it of removed) dirty.set(it.id, { id: it.id, board_id: boardId, data: it, rev: it.rev, deleted: true, client_id: clientId })
-    channels.ops?.send({
-      type: 'broadcast', event: 'commit',
-      payload: { c: clientId, items: changed.length <= 80 ? changed : [], removed: removed.map((r) => ({ id: r.id, rev: r.rev })) },
-    })
+    for (const it of changed) { dirty.set(it.id, { id: it.id, board_id: boardId, data: it, rev: it.rev, deleted: false, client_id: clientId }); lastSent.set(it.id, it) }
+    for (const it of removed) { dirty.set(it.id, { id: it.id, board_id: boardId, data: it, rev: it.rev, deleted: true, client_id: clientId }); lastSent.delete(it.id) }
+    // big payloads (long ink strokes, model previews) reach peers through the database stream instead
+    const light = changed.length <= 80 ? changed.filter((it) => !('pts' in it && it.pts.length > 1500) && !('preview' in it && it.preview)) : []
+    channels.ops?.send({ type: 'broadcast', event: 'commit', payload: { c: clientId, items: light, removed: removed.map((r) => ({ id: r.id, rev: r.rev })) } })
     useBoard.setState({ syncState: navigator.onLine ? 'saving' : 'offline' })
     saveOutbox(); saveCache(); flushSoon(); saveThumb()
   }
@@ -253,8 +358,18 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     delete next[id]
     useBoard.setState({ peers: next, following: S().following === id ? null : S().following })
   }
+  const safeName = (v: unknown) => (typeof v === 'string' ? v.slice(0, 60) : 'Guest')
+  const safeHex = (v: unknown) => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v : '#888888')
+  const finiteCam = (c: unknown): Peer['cam'] | undefined => {
+    const v = c as Record<string, unknown> | undefined
+    return v && ['x', 'y', 'z', 'vw', 'vh'].every((k) => typeof v[k] === 'number' && Number.isFinite(v[k])) && (v.z as number) > 0 && (v.vw as number) > 0 && (v.vh as number) > 0 ? (v as unknown as Peer['cam']) : undefined
+  }
+  const finiteBox = (b: unknown) => {
+    const v = b as Record<string, unknown> | undefined
+    return v && ['x', 'y', 'w', 'h'].every((k) => typeof v[k] === 'number' && Number.isFinite(v[k])) ? (v as unknown as { x: number; y: number; w: number; h: number }) : null
+  }
   try { await supabase.realtime.setAuth() } catch { /* not signed in */ }
-  if (stale()) return
+  if (stale()) { cleanupBase(); return }
 
   const presence = supabase.channel(`board:${boardId}`, { config: { private: true, presence: { key: myClient }, broadcast: { self: false } } })
   presence
@@ -267,31 +382,26 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       for (const key in state) {
         if (key === myClient) continue
         const p = state[key][0]
-        next[key] = { ...(peers()[key] || { id: key, seen: now }), id: key, user: p.user, name: p.name, color: p.color } as Peer
+        next[key] = { ...(peers()[key] || { id: key, seen: now }), id: key, user: String(p.user || ''), name: safeName(p.name), color: safeHex(p.color) } as Peer
       }
       const following = S().following
       useBoard.setState({ peers: next, following: following && next[following] ? following : null })
     })
     .on('broadcast', { event: 'cursor' }, ({ payload }) => {
-      const p = payload as { c: string; n?: string; col?: string; u?: string; x?: number; y?: number; sel?: string[]; cam?: Peer['cam'] }
+      const p = payload as { c: string; n?: string; col?: string; u?: string; x?: number; y?: number; sel?: string[]; cam?: unknown }
+      if (typeof p?.c !== 'string' || p.c === myClient) return
       const known = !!peers()[p.c]
-      const patch: Partial<Peer> = { sel: p.sel, seen: Date.now() }
-      if (p.n) { patch.name = p.n; patch.color = p.col; patch.user = p.u }
-      if (p.x != null) patch.cursor = { x: p.x, y: p.y! }
-      if (p.cam) patch.cam = p.cam
+      const patch: Partial<Peer> = { seen: Date.now() }
+      if (Array.isArray(p.sel)) patch.sel = p.sel.filter((x) => typeof x === 'string').slice(0, 30)
+      if (p.n) { patch.name = safeName(p.n); patch.color = safeHex(p.col); patch.user = String(p.u || '') }
+      if (typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y)) patch.cursor = { x: p.x, y: p.y }
+      const cam = finiteCam(p.cam)
+      if (cam) patch.cam = cam
       setPeer(p.c, patch)
       if (!known && p.n) hello()
-      if (S().following === p.c && p.cam) fitBox({ x: -p.cam.x / p.cam.z, y: -p.cam.y / p.cam.z, w: p.cam.vw / p.cam.z, h: p.cam.vh / p.cam.z }, 0, false, 8)
+      if (S().following === p.c && cam) fitBox({ x: -cam.x / cam.z, y: -cam.y / cam.z, w: cam.vw / cam.z, h: cam.vh / cam.z }, 0, false, 8)
     })
-    .on('broadcast', { event: 'bye' }, ({ payload }) => dropPeer((payload as { c: string }).c))
-    .on('broadcast', { event: 'summon' }, ({ payload }) => {
-      const p = payload as { name: string; box: { x: number; y: number; w: number; h: number } }
-      fitBox(p.box, 0, true, 8)
-      toast(`${p.name} brought everyone to their view`)
-    })
-    .on('broadcast', { event: 'react' }, ({ payload }) => {
-      window.dispatchEvent(new CustomEvent('wc-react', { detail: payload }))
-    })
+    .on('broadcast', { event: 'bye' }, ({ payload }) => dropPeer(String((payload as { c: unknown }).c)))
     .subscribe((status) => {
       if (status === 'SUBSCRIBED') { presence.track({ user: me.id, name: me.name, color: me.color }); hello() }
     })
@@ -299,27 +409,59 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
 
   const ops = supabase.channel(`ops:${boardId}`, { config: { private: true, broadcast: { self: false } } })
   ops
-    .on('broadcast', { event: 'live' }, ({ payload }) => { applyRemote((payload as { items: Item[] }).items || [], []) })
+    .on('broadcast', { event: 'live' }, ({ payload }) => {
+      const list = (payload as { patches?: Record<string, unknown>[] }).patches
+      if (!Array.isArray(list)) return
+      const { items } = S()
+      const out: unknown[] = []
+      for (const p of list.slice(0, 80)) {
+        if (!p || typeof p.id !== 'string') continue
+        if (p.full) out.push(p.full)
+        else if (items[p.id]) out.push({ ...items[p.id], ...p })
+      }
+      applyRemote(out as Item[], [])
+    })
     .on('broadcast', { event: 'commit' }, ({ payload }) => {
-      const p = payload as { items: Item[]; removed: { id: string; rev: number }[] }
-      applyRemote(p.items || [], p.removed || [])
+      const p = payload as { items?: Item[]; removed?: { id: string; rev: number }[] }
+      applyRemote(Array.isArray(p.items) ? p.items.slice(0, 200) : [], Array.isArray(p.removed) ? p.removed.filter((r) => r && typeof r.id === 'string' && typeof r.rev === 'number').slice(0, 5000) : [])
+    })
+    .on('broadcast', { event: 'summon' }, ({ payload }) => {
+      const p = payload as { name?: unknown; box?: unknown }
+      const box = finiteBox(p.box)
+      if (!box) return
+      fitBox(box, 0, true, 8)
+      toast(`${safeName(p.name)} brought everyone to their view`)
     })
     .subscribe()
   channels.ops = ops
 
+  // Database changes (from the agent API and from other clients) are merged once per frame, not once per row.
+  let inbox: Row[] = []
+  let inboxRaf = 0
+  const drain = () => {
+    inboxRaf = 0
+    const rows = inbox
+    inbox = []
+    const ups: Item[] = [], gone: { id: string; rev: number }[] = []
+    for (const r of rows) {
+      if (r.client_id === myClient) { if (!r.deleted) adoptRev(r.id, r.rev); continue }
+      if (r.deleted) gone.push({ id: r.id, rev: r.rev })
+      else ups.push({ ...r.data, id: r.id, rev: r.rev } as Item)
+    }
+    if (ups.length || gone.length) { applyRemote(ups, gone); saveCache() }
+  }
   const db = supabase.channel(`db:${boardId}`)
   db
     .on('postgres_changes', { event: '*', schema: 'public', table: 'board_items', filter: `board_id=eq.${boardId}` }, (payload) => {
       const r = payload.new as Row
-      if (!r || !r.id || r.client_id === myClient) return
-      if (r.deleted) applyRemote([], [{ id: r.id, rev: r.rev }])
-      else applyRemote([{ ...r.data, id: r.id, rev: r.rev }], [])
-      saveCache()
+      if (!r || !r.id) return
+      inbox.push(r)
+      if (!inboxRaf) inboxRaf = requestAnimationFrame(drain)
     })
     .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'boards', filter: `id=eq.${boardId}` }, (payload) => {
       const b = payload.new as BoardMeta
       const cur = S().meta
-      if (cur && b) useBoard.setState({ meta: { ...cur, title: b.title, link_access: b.link_access, settings: b.settings || {} } })
+      if (cur && b) useBoard.setState({ meta: { ...cur, title: String(b.title || cur.title).slice(0, 200), link_access: b.link_access, settings: b.settings || {} } })
     })
     .subscribe()
   channels.db = db
@@ -337,11 +479,30 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   // Announce ourselves over broadcast too: presence updates alone can be missed.
   function hello() { presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(null, true) }) }
   const sendCursor = throttle((p: Pt | null) => { presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(p, false) }) }, 60)
+
+  /** Access can be withdrawn while a board is open; check now and then, and close the board if it has gone. */
+  let checking = false
+  async function checkAccess() {
+    if (checking || !navigator.onLine || S().boardId !== boardId) return
+    checking = true
+    try {
+      const r = await supabase.rpc('board_role', { b: boardId })
+      if (r.error || S().boardId !== boardId) return
+      if (!r.data) { active?.close(); active = null; lockOut(); toast('You no longer have access to this board'); return }
+      if (r.data !== S().role) {
+        useBoard.setState({ role: r.data as Role, tool: 'select', editingId: null })
+        try { localStorage.setItem(roleKey(boardId), r.data as string) } catch { /* ignore */ }
+      }
+    } finally { checking = false }
+  }
+
+  let beats = 0
   const heartbeat = setInterval(() => {
     hello()
     const now = Date.now()
     const state = presence.presenceState()
     for (const key in peers()) if (now - peers()[key].seen > 35000 && !state[key]) dropPeer(key)
+    if (++beats % 6 === 0) checkAccess()
   }, 10000)
   const onLeave = () => { presence.send({ type: 'broadcast', event: 'bye', payload: { c: myClient } }) }
   window.addEventListener('pagehide', onLeave)
@@ -359,16 +520,22 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     id: boardId,
     flush: async () => { flushSoon.cancel(); await flush() },
     close: () => {
-      flushSoon.flush(); saveCache.flush(); saveOutbox.flush(); saveThumb.flush()
+      finishEditing()
+      flushSoon.flush(); saveOutbox.flush(); saveThumb.flush(); checkpoint.cancel()
+      if (S().boardId === boardId && S().status === 'ready') set(CACHE, Object.values(S().items)).catch(() => {})
+      saveCache.cancel()
       window.removeEventListener('online', onOnline)
+      window.removeEventListener('pagehide', leave)
       document.removeEventListener('visibilitychange', onHide)
       clearTimeout(retry)
-      unsubCam(); unsubSel()
+      cancelAnimationFrame(inboxRaf)
+      unsubSel()
       clearInterval(heartbeat); window.removeEventListener('pagehide', onLeave); onLeave()
       hooks.onCommit = undefined; hooks.onLive = undefined; bus.cursor = undefined
       for (const ch of [ops, db]) supabase.removeChannel(ch)
       setTimeout(() => supabase.removeChannel(presence), 400) // let the goodbye message leave first
       channels.presence = channels.ops = channels.db = undefined
+      cleanupBase()
     },
   }
 }
@@ -397,7 +564,7 @@ async function autoSnapshot(boardId: string, meta: BoardMeta) {
 export async function listVersions(boardId: string): Promise<Version[]> {
   if (isLocalBoard(boardId)) return ((await get(`wc.local.versions.${boardId}`)) as Version[] | undefined) || []
   const { data, error } = await supabase.from('board_versions').select('id,name,auto,item_count,created_at,created_by').eq('board_id', boardId).order('created_at', { ascending: false }).limit(100)
-  if (error) throw new Error(error.message)
+  if (error) throw new Error('Could not load version history')
   return (data || []) as Version[]
 }
 
@@ -406,17 +573,19 @@ export async function saveVersion(boardId: string, name: string) {
   if (isLocalBoard(boardId)) {
     const id = `v-${Date.now()}`
     const list = await listVersions(boardId)
-    await set(`wc.local.versions.${boardId}`, [{ id, name, auto: false, item_count: items.length, created_at: new Date().toISOString(), created_by: null }, ...list].slice(0, 40))
+    const keep = [{ id, name, auto: false, item_count: items.length, created_at: new Date().toISOString(), created_by: null }, ...list]
+    for (const old of keep.slice(40)) del(`wc.local.version.${old.id}`).catch(() => {})
+    await set(`wc.local.versions.${boardId}`, keep.slice(0, 40))
     await set(`wc.local.version.${id}`, items)
     return
   }
-  const { error } = await supabase.from('board_versions').insert({ board_id: boardId, name, auto: false, item_count: items.length, snapshot: items })
-  if (error) throw new Error(error.message)
+  const { error } = await supabase.from('board_versions').insert({ board_id: boardId, name: name.slice(0, 200), auto: false, item_count: items.length, snapshot: items })
+  if (error) throw new Error('Could not save this version')
 }
 
 export async function loadVersion(boardId: string, versionId: string): Promise<Item[]> {
-  if (isLocalBoard(boardId)) return ((await get(`wc.local.version.${versionId}`)) as Item[] | undefined) || []
+  if (isLocalBoard(boardId)) return normalizeItems(await get(`wc.local.version.${versionId}`))
   const { data, error } = await supabase.from('board_versions').select('snapshot').eq('id', versionId).single()
-  if (error) throw new Error(error.message)
-  return (data.snapshot || []) as Item[]
+  if (error) throw new Error('Could not load this version')
+  return normalizeItems(data.snapshot)
 }

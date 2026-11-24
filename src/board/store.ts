@@ -306,8 +306,11 @@ export function contentBox(ids?: string[]): Box | null {
 }
 
 let anim = 0
+const reducedMotion = () => typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches
+
 export function animateCamera(to: Camera, ms = 260) {
   cancelAnimationFrame(anim)
+  if (reducedMotion()) { S().setCamera(to); return }
   const from = S().camera
   const t0 = performance.now()
   const step = (t: number) => {
@@ -323,8 +326,13 @@ export function fitBox(b: Box | null, pad = 80, animate = true, maxZoom = 1.5) {
   const { viewport } = S()
   if (!b || !b.w && !b.h) { (animate ? animateCamera : S().setCamera)({ x: viewport.w / 2, y: viewport.h / 2, z: 1 }); return }
   const p = Math.min(pad, viewport.w * 0.12)
-  const z = clamp(Math.min((viewport.w - p * 2) / Math.max(b.w, 1), (viewport.h - p * 2) / Math.max(b.h, 1)), MIN_ZOOM, maxZoom)
-  const cam = { x: viewport.w / 2 - (b.x + b.w / 2) * z, y: viewport.h / 2 - (b.y + b.h / 2) * z, z }
+  // leave room for the bars that float over the canvas, so fitted content is never hidden under them
+  const narrow = viewport.w <= 640 || viewport.h <= 520
+  const presenting = S().presenting != null
+  const inset = presenting || pad === 0 ? { t: 0, r: 0, b: presenting ? 64 : 0, l: 0 } : narrow ? { t: 96, r: 0, b: 72, l: 0 } : { t: 56, r: 0, b: 0, l: 56 }
+  const aw = Math.max(40, viewport.w - inset.l - inset.r - p * 2), ah = Math.max(40, viewport.h - inset.t - inset.b - p * 2)
+  const z = clamp(Math.min(aw / Math.max(b.w, 1), ah / Math.max(b.h, 1)), MIN_ZOOM, maxZoom)
+  const cam = { x: inset.l + (viewport.w - inset.l - inset.r) / 2 - (b.x + b.w / 2) * z, y: inset.t + (viewport.h - inset.t - inset.b) / 2 - (b.y + b.h / 2) * z, z }
   if (animate) animateCamera(cam)
   else S().setCamera(cam)
 }
@@ -359,4 +367,31 @@ try {
 export function adoptRev(id: string, rev: number) {
   const it = S().items[id]
   if (it && rev > (it.rev || 0) && !pending.has(id)) useBoard.setState({ items: { ...S().items, [id]: { ...it, rev } as Item } })
+}
+
+/**
+ * Writes a derived value (such as a measured text height) without creating an undo step.
+ * If the item is part of a gesture in progress the change simply joins that gesture.
+ */
+export function patchSilent(id: string, partial: Partial<Item>) {
+  const s = S()
+  const it = s.items[id]
+  if (!it) return
+  if (pending.has(id)) { mutate({ [id]: { ...it, ...partial } as Item }); return }
+  if (s.role !== 'owner' && s.role !== 'editor') return
+  const next = { ...it, ...partial, rev: (it.rev || 0) + 1 } as Item
+  useBoard.setState({ items: { ...s.items, [id]: next } })
+  hooks.onCommit?.([next], [])
+}
+
+export const isPending = (id: string) => pending.has(id)
+
+/** Replaces (or removes) an item with the server's copy, bypassing revision checks. Used when a save is refused. */
+export function replaceItem(id: string, item: Item | null) {
+  pending.delete(id)
+  const s = S()
+  const items = { ...s.items }
+  if (item) items[id] = item
+  else delete items[id]
+  useBoard.setState({ items, selection: item ? s.selection : s.selection.filter((x) => x !== id), editingId: s.editingId === id && !item ? null : s.editingId })
 }

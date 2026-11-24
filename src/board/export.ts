@@ -1,11 +1,17 @@
 // Export: vector SVG, PNG at a chosen scale, print-to-PDF, JSON backup, CSV.
-import { getStroke } from 'perfect-freehand'
-import { download, escapeHtml, htmlToText } from '../lib/util'
+import { download, escapeAttr, escapeHtml, htmlToText } from '../lib/util'
 import { resolveAsset } from './assets'
 import { FONT_STACK, inkOn } from './defaults'
-import { aabb, capPath, connectorGeom, itemBox, shapeInset, shapePath, strokeToPath, unionBoxes } from './geometry'
+import { aabb, capPath, connectorGeom, itemBox, shapeInset, shapePath, unionBoxes } from './geometry'
+import { inkPath } from './items/ItemView'
 import { S } from './store'
 import type { Box, Item, TextStyle } from './types'
+import { safeColor } from './validate'
+
+// Every value that reaches markup goes through one of these: numbers are coerced, colours are checked.
+const n = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? Math.round(x * 100) / 100 : 0 }
+const col = (v: unknown, fallback = '#1c1e23') => safeColor(v, fallback)
+const fillOf = (v: unknown, fallback = '#ffffff') => { const c = safeColor(v, fallback); return c === 'transparent' ? 'none' : c }
 
 const LAYER: Record<string, number> = { frame: 0, comment: 2 }
 const sortItems = (list: Item[]) => [...list].sort((a, b) => (LAYER[a.type] ?? 1) - (LAYER[b.type] ?? 1) || a.z - b.z)
@@ -23,14 +29,14 @@ export function thumbnailSvg(items: Record<string, Item>): string {
     const r = (n: number) => Math.round(n)
     if (it.type === 'connector') {
       const g = connectorGeom(it, items)
-      out += `<path d="${g.d.replace(/(\d+\.\d)\d+/g, '$1')}" fill="none" stroke="${it.stroke}" stroke-width="${sw}"/>`
+      out += `<path d="${g.d.replace(/(\d+\.\d)\d+/g, '$1')}" fill="none" stroke="${col(it.stroke)}" stroke-width="${n(sw)}"/>`
     } else if (it.type === 'draw') {
-      out += `<rect x="${r(it.x)}" y="${r(it.y)}" width="${r(it.w)}" height="${r(it.h)}" fill="none" stroke="${it.stroke}" stroke-width="${sw}" opacity=".5" rx="${sw * 3}"/>`
+      out += `<rect x="${r(it.x)}" y="${r(it.y)}" width="${r(it.w)}" height="${r(it.h)}" fill="none" stroke="${col(it.stroke)}" stroke-width="${n(sw)}" opacity=".5" rx="${n(sw * 3)}"/>`
     } else {
       const fill = it.type === 'sticky' || it.type === 'shape' ? it.fill : it.type === 'frame' ? '#ffffff' : it.type === 'text' ? '#b9bbc2' : it.type === 'image' || it.type === 'ifc' ? '#c8d3e6' : '#e8e7e2'
-      const stroke = it.type === 'frame' ? '#c9c7c0' : it.type === 'shape' ? it.stroke : 'none'
+      const stroke = it.type === 'frame' ? '#c9c7c0' : it.type === 'shape' ? col(it.stroke) : 'none'
       const h = it.type === 'text' ? Math.max(sw * 2, it.h * 0.4) : it.h
-      out += `<rect x="${r(it.x)}" y="${r(it.y)}" width="${r(it.w)}" height="${r(h)}" fill="${fill === 'transparent' ? 'none' : fill}" stroke="${stroke}" stroke-width="${sw}"${it.rot ? ` transform="rotate(${it.rot} ${r(it.x + it.w / 2)} ${r(it.y + it.h / 2)})"` : ''}/>`
+      out += `<rect x="${r(it.x)}" y="${r(it.y)}" width="${r(it.w)}" height="${r(h)}" fill="${fillOf(fill, '#e8e7e2')}" stroke="${stroke}" stroke-width="${n(sw)}"${it.rot ? ` transform="rotate(${n(it.rot)} ${r(it.x + it.w / 2)} ${r(it.y + it.h / 2)})"` : ''}/>`
     }
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="xMidYMid meet">${out}</svg>`
@@ -74,11 +80,11 @@ function textBlock(html: string, st: TextStyle, box: Box, defaults: { color: str
   const total = lines.length * size * 1.3
   const y0 = (valign === 'top' ? box.y : valign === 'bottom' ? box.y + box.h - total : box.y + (box.h - total) / 2) + size
   const deco = [st.underline ? 'underline' : '', st.strike ? 'line-through' : ''].join(' ').trim()
-  return `<text font-family='${family}' font-size="${size}" font-weight="${weight}"${st.italic ? ' font-style="italic"' : ''}${deco ? ` text-decoration="${deco}"` : ''} fill="${st.color || defaults.color}" text-anchor="${anchor}">${lines
+  return `<text font-family='${family}' font-size="${n(size)}" font-weight="${weight}"${st.italic ? ' font-style="italic"' : ''}${deco ? ` text-decoration="${deco}"` : ''} fill="${col(st.color, defaults.color)}" text-anchor="${anchor}">${lines
     .map((l, i) => `<tspan x="${x}" y="${y0 + i * size * 1.3}">${escapeHtml(l) || ' '}</tspan>`).join('')}</text>`
 }
 
-const dash = (d: string | undefined, w: number) => (d === 'dashed' ? ` stroke-dasharray="${w * 4} ${w * 3}"` : d === 'dotted' ? ` stroke-dasharray="${w * 0.1} ${w * 2.2}" stroke-linecap="round"` : '')
+const dash = (d: string | undefined, w: number) => (d === 'dashed' ? ` stroke-dasharray="${n(w * 4)} ${n(w * 3)}"` : d === 'dotted' ? ` stroke-dasharray="${n(w * 0.1)} ${n(w * 2.2)}"` : '')
 
 async function toDataUrl(src: string, maxSide = 2200): Promise<string> {
   try {
@@ -101,68 +107,65 @@ async function itemSvg(it: Item, items: Record<string, Item>): Promise<string> {
     const g = connectorGeom(it, items)
     const size = 6 + it.strokeW * 3
     const caps = [capPath(it.capA, g.pts[0], g.tanA, size), capPath(it.capB, g.pts[g.pts.length - 1], g.tanB, size)]
-    let out = `<path d="${g.d}" fill="none" stroke="${it.stroke}" stroke-width="${it.strokeW}" stroke-linecap="round" stroke-linejoin="round"${dash(it.dash, it.strokeW)}/>`
-    for (const c of caps) if (c) out += `<path d="${c.d}" fill="${c.fill ? it.stroke : 'none'}" stroke="${it.stroke}" stroke-width="${it.strokeW}" stroke-linecap="round" stroke-linejoin="round"/>`
+    const stroke = col(it.stroke), sw = n(it.strokeW)
+    let out = `<path d="${g.d}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${dash(it.dash, it.strokeW)}/>`
+    for (const c of caps) if (c) out += `<path d="${c.d}" fill="${c.fill ? stroke : 'none'}" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/>`
     if (it.label) {
       const fs = it.fontSize || 14
       const w = it.label.length * fs * 0.58 + 12
-      out += `<rect x="${g.mid.x - w / 2}" y="${g.mid.y - fs * 0.8}" width="${w}" height="${fs * 1.6}" rx="6" fill="#f6f5f1"/><text x="${g.mid.x}" y="${g.mid.y + fs * 0.35}" text-anchor="middle" font-family='${FONT_STACK.sans}' font-size="${fs}" font-weight="500" fill="${it.color || '#1c1e23'}">${escapeHtml(it.label)}</text>`
+      out += `<rect x="${g.mid.x - w / 2}" y="${g.mid.y - fs * 0.8}" width="${w}" height="${fs * 1.6}" rx="6" fill="#f6f5f1"/><text x="${g.mid.x}" y="${g.mid.y + fs * 0.35}" text-anchor="middle" font-family='${FONT_STACK.sans}' font-size="${n(fs)}" font-weight="500" fill="${col(it.color)}">${escapeHtml(it.label)}</text>`
     }
     return out
   }
-  const open = `<g transform="translate(${it.x} ${it.y})${it.rot ? ` rotate(${it.rot} ${it.w / 2} ${it.h / 2})` : ''}">`
+  const open = `<g transform="translate(${n(it.x)} ${n(it.y)})${it.rot ? ` rotate(${n(it.rot)} ${n(it.w / 2)} ${n(it.h / 2)})` : ''}">`
   const local: Box = { x: 0, y: 0, w: it.w, h: it.h }
   let body = ''
   switch (it.type) {
     case 'frame':
-      body = `<rect width="${it.w}" height="${it.h}" fill="${it.fill === 'transparent' ? 'none' : it.fill}" stroke="#c9c7c0"/><text x="0" y="-8" font-family='${FONT_STACK.sans}' font-size="14" font-weight="600" fill="#5b5f6a">${escapeHtml(it.title)}</text>`
+      body = `<rect width="${n(it.w)}" height="${n(it.h)}" fill="${fillOf(it.fill)}" stroke="#c9c7c0"/><text x="0" y="-8" font-family='${FONT_STACK.sans}' font-size="14" font-weight="600" fill="#5b5f6a">${escapeHtml(it.title)}</text>`
       break
     case 'sticky': {
       const m = it.w * 0.07
-      body = `<rect width="${it.w}" height="${it.h}" rx="3" fill="${it.fill}"/>` + textBlock(it.html, it, { x: m, y: m, w: it.w - m * 2, h: it.h - m * 2 }, { color: inkOn(it.fill), size: 18 })
+      body = `<rect width="${n(it.w)}" height="${n(it.h)}" rx="3" fill="${fillOf(it.fill, '#fff2a8')}"/>` + textBlock(it.html, it, { x: m, y: m, w: it.w - m * 2, h: it.h - m * 2 }, { color: inkOn(it.fill), size: 18 })
       break
     }
     case 'text':
-      body = (it.fill ? `<rect width="${it.w}" height="${it.h}" rx="4" fill="${it.fill}"/>` : '') + textBlock(it.html, it, { x: 4, y: 2, w: Math.max(10, it.w - 8), h: it.h + 400 }, { color: '#1c1e23', align: 'left', valign: 'top', size: 20 })
+      body = (it.fill ? `<rect width="${n(it.w)}" height="${n(it.h)}" rx="4" fill="${fillOf(it.fill)}"/>` : '') + textBlock(it.html, it, { x: 4, y: 2, w: Math.max(10, it.w - 8), h: it.h + 400 }, { color: '#1c1e23', align: 'left', valign: 'top', size: 20 })
       break
     case 'shape': {
       const [ix, iy] = shapeInset(it.kind)
-      body = `<path d="${shapePath(it.kind, it.w, it.h)}" fill="${it.fill === 'transparent' ? 'none' : it.fill}" stroke="${it.strokeW ? it.stroke : 'none'}" stroke-width="${it.strokeW}" stroke-linejoin="round"${dash(it.dash, it.strokeW)}${it.opacity != null ? ` opacity="${it.opacity}"` : ''}/>` +
+      body = `<path d="${shapePath(it.kind, it.w, it.h)}" fill="${fillOf(it.fill)}" stroke="${it.strokeW ? col(it.stroke) : 'none'}" stroke-width="${n(it.strokeW)}" stroke-linejoin="round" stroke-linecap="round"${dash(it.dash, it.strokeW)}${it.opacity != null ? ` opacity="${n(it.opacity)}"` : ''}/>` +
         textBlock(it.html, it, { x: it.w * ix, y: it.h * iy, w: it.w * (1 - ix * 2), h: it.h * (1 - iy * 2) }, { color: it.fill === 'transparent' ? '#1c1e23' : inkOn(it.fill) })
       break
     }
-    case 'draw': {
-      const input: number[][] = []
-      for (let i = 0; i < it.pts.length; i += 3) input.push([it.pts[i], it.pts[i + 1], it.pts[i + 2] ?? 0.5])
-      const d = strokeToPath(getStroke(input, { size: it.size, thinning: it.tool === 'highlighter' ? 0 : 0.55, smoothing: 0.55, streamline: 0.4, simulatePressure: input.every((p) => p[2] === 0.5), last: true }))
-      body = `<path transform="scale(${it.w / (it.w0 || 1)} ${it.h / (it.h0 || 1)})" d="${d}" fill="${it.stroke}"${it.tool === 'highlighter' ? ' opacity="0.45"' : ''}/>`
+    case 'draw':
+      body = `<path d="${inkPath(it)}" fill="${col(it.stroke)}"${it.tool === 'highlighter' ? ' opacity="0.45"' : ''}/>`
       break
-    }
     case 'image': case 'ifc': {
       const href = it.type === 'image' ? await toDataUrl(it.src) : it.preview || ''
       body = href
-        ? `<image href="${href}" width="${it.w}" height="${it.h}" preserveAspectRatio="none"/>`
-        : `<rect width="${it.w}" height="${it.h}" rx="8" fill="#eef0f3" stroke="#d9d7d0"/><text x="${it.w / 2}" y="${it.h / 2}" text-anchor="middle" font-family='${FONT_STACK.sans}' font-size="13" fill="#7a7d86">${escapeHtml(it.type === 'ifc' ? it.name : 'Image')}</text>`
+        ? `<image href="${escapeAttr(href)}" width="${n(it.w)}" height="${n(it.h)}" preserveAspectRatio="none"/>`
+        : `<rect width="${n(it.w)}" height="${n(it.h)}" rx="8" fill="#eef0f3" stroke="#d9d7d0"/><text x="${n(it.w / 2)}" y="${n(it.h / 2)}" text-anchor="middle" font-family='${FONT_STACK.sans}' font-size="13" fill="#7a7d86">${escapeHtml(it.type === 'ifc' ? it.name : 'Image')}</text>`
       break
     }
     case 'embed':
       body = `<rect width="${it.w}" height="${it.h}" rx="10" fill="#ffffff" stroke="#d9d7d0"/><text x="14" y="26" font-family='${FONT_STACK.sans}' font-size="14" font-weight="600" fill="#1c1e23">${escapeHtml((it.title || 'Embedded page').slice(0, 60))}</text><text x="14" y="46" font-family='${FONT_STACK.sans}' font-size="11" fill="#1d5fd1">${escapeHtml(it.url.slice(0, 80))}</text>`
       break
     case 'card':
-      body = `<rect width="${it.w}" height="${it.h}" rx="10" fill="#ffffff" stroke="#d9d7d0"/><rect width="5" height="${it.h}" fill="${it.fill}"/>` +
+      body = `<rect width="${n(it.w)}" height="${n(it.h)}" rx="10" fill="#ffffff" stroke="#d9d7d0"/><rect width="5" height="${n(it.h)}" fill="${fillOf(it.fill, '#0090ff')}"/>` +
         textBlock(escapeHtml(it.title), { fontSize: 15, bold: true, align: 'left', valign: 'top' }, { x: 16, y: 10, w: it.w - 28, h: 40 }, { color: '#1c1e23' }) +
         textBlock(escapeHtml([it.desc, [it.status, it.assignee, it.due, ...(it.tags || []).map((t) => '#' + t)].filter(Boolean).join(' · ')].filter(Boolean).join('\n')), { fontSize: 12, align: 'left', valign: 'top' }, { x: 16, y: 34, w: it.w - 28, h: it.h - 40 }, { color: '#5b5f6a' })
       break
     case 'table': {
       const sx = it.w / (it.colW.reduce((a, b) => a + b, 0) || 1), sy = it.h / (it.rowH.reduce((a, b) => a + b, 0) || 1)
-      body = `<rect width="${it.w}" height="${it.h}" fill="${it.fill || '#ffffff'}"/>`
+      body = `<rect width="${n(it.w)}" height="${n(it.h)}" fill="${fillOf(it.fill)}"/>`
       let y = 0
       it.cells.forEach((row, r) => {
         let x = 0
         const h = it.rowH[r] * sy
         row.forEach((cell, c) => {
           const w = it.colW[c] * sx
-          body += `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${it.header && r === 0 ? 'rgba(21,23,28,.06)' : 'none'}" stroke="${it.stroke || '#c9cbd1'}"/>` +
+          body += `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${it.header && r === 0 ? 'rgba(21,23,28,.06)' : 'none'}" stroke="${col(it.stroke, '#c9cbd1')}"/>` +
             textBlock(escapeHtml(cell), { fontSize: it.fontSize || 14, bold: it.header && r === 0, align: 'left', valign: 'top', color: it.color }, { x: x + 9, y: y + 6, w: w - 18, h: h - 8 }, { color: '#1c1e23' })
           x += w
         })
@@ -180,8 +183,16 @@ async function itemSvg(it: Item, items: Record<string, Item>): Promise<string> {
       body = `<rect width="${it.w}" height="${it.h}" rx="10" fill="#ffffff" stroke="#d9d7d0"/><text x="16" y="${it.h / 2 + 5}" font-family='${FONT_STACK.sans}' font-size="14" font-weight="500" fill="#1c1e23">${escapeHtml(it.name)}</text>`
       break
     case 'chart': {
-      const el = document.querySelector(`[data-id="${it.id}"] .wc-chart svg`)
-      body = `<rect width="${it.w}" height="${it.h}" rx="10" fill="#ffffff" stroke="#d9d7d0"/>` + (el ? el.innerHTML : '')
+      const fill = col(it.fill, '#0090ff')
+      const max = Math.max(1, ...it.values)
+      const top = it.title ? 34 : 14, left = 44, pw = Math.max(10, it.w - 58), ph = Math.max(10, it.h - top - 30)
+      const step = pw / (it.values.length || 1)
+      body = `<rect width="${n(it.w)}" height="${n(it.h)}" rx="10" fill="#ffffff" stroke="#d9d7d0"/>` +
+        (it.title ? `<text x="14" y="22" font-family='${FONT_STACK.sans}' font-size="14" font-weight="600" fill="#1c1e23">${escapeHtml(it.title)}</text>` : '') +
+        it.values.map((v, i) => {
+          const h = (Math.max(0, v) / max) * ph
+          return `<rect x="${n(left + step * i + step * 0.16)}" y="${n(top + ph - h)}" width="${n(step * 0.68)}" height="${n(h)}" rx="3" fill="${fill}"/><text x="${n(left + step * (i + 0.5))}" y="${n(it.h - 10)}" text-anchor="middle" font-family='${FONT_STACK.sans}' font-size="10" fill="#7a7d86">${escapeHtml((it.labels[i] || '').slice(0, 10))}</text>`
+        }).join('')
       break
     }
   }
@@ -218,15 +229,19 @@ export async function buildSvg(area: ExportArea, opts: { pad?: number; backgroun
   const pad = opts.pad ?? 32
   const b = { x: area.box.x - pad, y: area.box.y - pad, w: area.box.w + pad * 2, h: area.box.h + pad * 2 }
   const list = sortItems(area.ids.map((id) => items[id]).filter(Boolean))
-  const parts = await Promise.all(list.map((it) => itemSvg(it, items)))
-  const bg = opts.background === null ? '' : `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" fill="${opts.background || '#f6f5f1'}"/>`
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(b.w)}" height="${Math.round(b.h)}" viewBox="${b.x} ${b.y} ${b.w} ${b.h}">${bg}${parts.join('')}</svg>`
+  // images are fetched and encoded a few at a time so a photo-heavy board does not exhaust memory
+  const parts: string[] = new Array(list.length)
+  let next = 0
+  await Promise.all(Array.from({ length: 4 }, async () => { while (next < list.length) { const i = next++; parts[i] = await itemSvg(list[i], items).catch(() => '') } }))
+  const bg = opts.background === null ? '' : `<rect x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}" fill="${fillOf(opts.background, '#f6f5f1')}"/>`
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(b.w)}" height="${Math.round(b.h)}" viewBox="${n(b.x)} ${n(b.y)} ${n(b.w)} ${n(b.h)}">${bg}${parts.join('')}</svg>`
   return { svg, w: b.w, h: b.h }
 }
 
 export async function svgToPng(svg: string, w: number, h: number, scale: number): Promise<Blob> {
-  const max = 12000
-  const k = Math.min(scale, max / w, max / h)
+  // stay inside what phones and tablets can allocate for one canvas (about 16 megapixels)
+  const maxSide = 8192, maxArea = 16_000_000
+  const k = Math.min(scale, maxSide / w, maxSide / h, Math.sqrt(maxArea / (w * h)))
   const img = new Image()
   const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
   try {
@@ -266,8 +281,9 @@ export async function exportPdf(scope: 'frames' | 'all' | 'selection') {
     .p:last-child { page-break-after: auto; break-after: auto; }
     svg { max-width: 100%; max-height: 100%; width: 100%; height: 100%; }
     @media screen { body { background: #ddd; } .p { height: auto; margin: 12px auto; max-width: 900px; background: #fff; } }
-  </style></head><body>${pages.map((p) => `<div class="p">${p.svg}</div>`).join('')}<script>window.onload=function(){setTimeout(function(){window.print()},300)}<\/script></body></html>`)
+  </style></head><body>${pages.map((p) => `<div class="p">${p.svg}</div>`).join('')}</body></html>`)
   win.document.close()
+  setTimeout(() => { try { win.focus(); win.print() } catch { /* the user can print from the new tab */ } }, 400)
 }
 
 export function exportJson() {
@@ -278,7 +294,8 @@ export function exportJson() {
 export function exportCsv() {
   const { items, meta } = S()
   const frames = items
-  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
+  // cells that look like formulas are neutralised so a spreadsheet never executes board text
+  const esc = (v: unknown) => { const t = String(v ?? ''); return `"${(/^[=+\-@\t\r]/.test(t) ? "'" + t : t).replace(/"/g, '""')}"` }
   const rows = [['type', 'text', 'frame', 'color', 'tags', 'votes', 'x', 'y'].join(',')]
   for (const it of sortItems(Object.values(items))) {
     let text = ''

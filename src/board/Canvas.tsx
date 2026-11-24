@@ -3,13 +3,13 @@ import { aabb, connectorGeom, intersects, itemBox, toScreen, unionBoxes } from '
 import { DOM_ITEM_LIMIT, paintOverview, setThumbListener } from './overview'
 import { Interaction } from './interaction'
 import { ItemView } from './items/ItemView'
-import { S, canEdit, useBoard } from './store'
+import { S, animateCamera, canEdit, useBoard } from './store'
 import type { Item } from './types'
 
 const LAYER: Record<string, number> = { frame: 0, comment: 2 }
 
 /** What is currently drawn: DOM item ids, and (for crowded views) the ids painted on the overview canvas. */
-export const view: { dom: string[]; overview: string[] | null } = { dom: [], overview: null }
+export const view: { dom: string[]; overview: string[] | null; refresh: (() => void) | null } = { dom: [], overview: null, refresh: null }
 
 function computeVisible(): { dom: string[]; overview: string[] | null; lost: boolean } {
   const { items, camera, viewport, showComments, editingId, selection } = S()
@@ -82,8 +82,10 @@ function useScene(canvasRef: React.RefObject<HTMLCanvasElement | null>): string[
       if (s.items !== p.items || s.camera !== p.camera || s.viewport !== p.viewport || s.showComments !== p.showComments || s.editingId !== p.editingId || s.selection !== p.selection || s.theme !== p.theme) schedule()
     })
     setThumbListener(schedule)
+    // lets a caller bring the scene up to date immediately (used when editing starts, so the editor can take focus at once)
+    view.refresh = () => { cancelAnimationFrame(raf); run() }
     schedule()
-    return () => { unsub(); setThumbListener(null); cancelAnimationFrame(raf); view.dom = []; view.overview = null }
+    return () => { unsub(); setThumbListener(null); cancelAnimationFrame(raf); view.dom = []; view.overview = null; view.refresh = null }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
   return ids
 }
@@ -137,11 +139,26 @@ export function Canvas() {
     measure()
     applyCam()
     const ix = new Interaction(el)
-    return () => { unsub(); ro.disconnect(); ix.destroy(); clearTimeout(settle) }
+    // When the on-screen keyboard (or a fold) shrinks the view, keep the item being edited in sight.
+    const reveal = () => {
+      const s = S()
+      const it = s.editingId ? s.items[s.editingId] : null
+      if (!it || it.type === 'connector') return
+      const b = itemBox(it, s.items)
+      const top = b.y * s.camera.z + s.camera.y, bottom = (b.y + b.h) * s.camera.z + s.camera.y
+      const narrow = s.viewport.w <= 640 || s.viewport.h <= 520
+      const safeTop = 70, safeBottom = s.viewport.h - (narrow ? 132 : 24)
+      let dy = 0
+      if (bottom > safeBottom) dy = safeBottom - bottom
+      if (top + dy < safeTop) dy = safeTop - top
+      if (Math.abs(dy) > 2) animateCamera({ x: s.camera.x, y: s.camera.y + dy, z: s.camera.z }, 180)
+    }
+    const unsubReveal = useBoard.subscribe((s, p) => { if (s.editingId && (s.editingId !== p.editingId || s.viewport !== p.viewport)) requestAnimationFrame(reveal) })
+    return () => { unsub(); unsubReveal(); ro.disconnect(); ix.destroy(); clearTimeout(settle) }
   }, [])
 
   return (
-    <div ref={viewRef} className={`wc-viewport tool-${tool} grid-${grid} ${presenting ? 'is-presenting' : ''}`} data-canvas>
+    <div ref={viewRef} className={`wc-viewport tool-${tool} grid-${grid} ${presenting ? 'is-presenting' : ''}`} data-canvas tabIndex={0} role="application" aria-label="Board canvas. Press Tab to move between items, Enter to edit, question mark for shortcuts.">
       <canvas ref={canvasRef} className="wc-overview" aria-hidden="true" />
       <div ref={worldRef} className="wc-world">
         <Items ids={ids} />
@@ -189,14 +206,14 @@ function Overlay() {
       const p = sc(it.x, it.y)
       const w = it.w * z, h = it.h * z
       const isEditing = editingId === it.id
-      const sideOnly = it.type === 'text'
-      const handles = sideOnly ? ['nw', 'ne', 'se', 'sw', 'e', 'w'] : HANDLES
+      const isText = it.type === 'text'
+      const handles = isText ? ['nw', 'ne', 'se', 'sw', 'e', 'w'] : HANDLES
       const small = w < 44 || h < 44
       selUi = (
         <div className={`wc-selbox ${it.locked ? 'is-locked' : ''}`} style={{ left: p.x, top: p.y, width: w, height: h, transform: it.rot ? `rotate(${it.rot}deg)` : undefined }}>
           {editable && !it.locked && !isEditing && (
             <>
-              {handles.filter((hd) => !small || hd.length === 2).map((hd) => <div key={hd} className={`wc-handle h-${hd}`} data-handle={hd} />)}
+              {handles.filter((hd) => !small || hd.length === 2 || (isText && w >= 36)).map((hd) => <div key={hd} className={`wc-handle h-${hd}`} data-handle={hd} />)}
               <div className="wc-handle is-rot" data-handle="rot" />
               {DOTTED.has(it.type) && !small && ['l', 'r', 't', 'b'].map((d) => <div key={d} className={`wc-dot d-${d}`} data-handle={`dot-${d}`} title="Drag to connect, click to add a linked copy" />)}
             </>

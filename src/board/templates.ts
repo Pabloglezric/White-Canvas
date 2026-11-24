@@ -57,7 +57,8 @@ export const TEMPLATES: Template[] = [
       const y = make.shape({ x: 0, y: 500, w: 180, h: 80, kind: 'rect', html: 'Do this' })
       const n = make.shape({ x: 300, y: 315, w: 180, h: 80, kind: 'rect', html: 'Do that' })
       const e = make.shape({ x: 0, y: 650, w: 180, h: 70, kind: 'pill', html: 'End', fill: '#ffb7a0' })
-      return [s, a, d, y, n, e, link(s, a), link(a, d), link(d, y, 'Yes'), link(d, n, 'No'), link(y, e), link(n, e)]
+      return [s, a, d, y, n, e, link(s, a), link(a, d), link(d, y, 'Yes'), link(d, n, 'No'), link(y, e),
+        make.connector({ item: n.id, ax: 0.5, ay: 1, x: 0, y: 0 }, { item: e.id, ax: 1, ay: 0.5, x: 0, y: 0 })]
     },
   },
   {
@@ -72,7 +73,8 @@ export const TEMPLATES: Template[] = [
         const b = make.shape({ x: side * 360 - 90, y: row * 150 - 32, w: 180, h: 64, kind: 'round', html: `Branch ${i + 1}`, fill: fills[i], strokeW: 0 })
         out.push(b, make.connector({ item: c.id, x: 0, y: 0 }, { item: b.id, x: b.x, y: b.y }, { route: 'curve', capB: 'none' }))
         for (let k = 0; k < 2; k++) {
-          const leaf = make.text({ x: side * 620 - (side < 0 ? 100 : 0), y: row * 150 - 34 + k * 40, w: 120, autoW: true, fontSize: 15, html: `Idea ${k + 1}` })
+          // left-hand leaves are right-aligned so their text meets the branch line
+          const leaf = make.text({ x: side * 620 - (side < 0 ? 100 : 0), y: row * 150 - 34 + k * 40, w: 120, autoW: side > 0, align: side > 0 ? 'left' : 'right', fontSize: 15, html: `Idea ${k + 1}` })
           out.push(leaf, make.connector({ item: b.id, x: 0, y: 0 }, { item: leaf.id, x: leaf.x, y: leaf.y }, { route: 'curve', capB: 'none', strokeW: 1.5, stroke: '#8f939d' }))
         }
       }
@@ -139,7 +141,7 @@ export const TEMPLATES: Template[] = [
     id: 'matrix', name: 'Priority matrix', desc: 'Impact against effort in four quadrants',
     build: () => {
       const out: Item[] = []
-      const q: [string, string][] = [['Quick wins', '#c4eea6'], ['Big bets', '#a8dcff'], ['Fill-ins', '#f1f0ec'], ['Avoid', '#ffb7a0']]
+      const q: [string, string][] = [['Quick wins', '#c4eea6'], ['Big bets', '#a8dcff'], ['Fill-ins', '#d9d6cc'], ['Avoid', '#ffb7a0']]
       q.forEach(([n, fill], i) => {
         const x = (i % 2) * 460, y = Math.floor(i / 2) * 360
         out.push(make.shape({ x, y, w: 450, h: 350, kind: 'rect', fill, strokeW: 0, html: '', opacity: 0.5 }), title(x + 18, y + 14, n, 20))

@@ -4,6 +4,7 @@ import {
   LayoutGrid, Lock, Minus, MoreHorizontal, MousePointerClick, PaintBucket, Pencil, Play, Plus, Rows3, Shapes, Strikethrough,
   Trash2, Underline, Ungroup, Unlock,
 } from 'lucide-react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { FILL_COLORS, INK_COLORS, SHAPE_KINDS, STICKY_COLORS } from '../defaults'
 import { aabb, itemBox, shapePath, toScreen, unionBoxes } from '../geometry'
 import { activate } from '../interaction'
@@ -37,6 +38,7 @@ export function ContextBar() {
   const flex = useFlexMode()
   const sel = selection.map((id) => items[id]).filter(Boolean) as Item[]
   if (!sel.length || tool !== 'select' || presenting || marquee || (role !== 'owner' && role !== 'editor')) return null
+  if (sel.every((i) => i.type === 'comment')) return null // comment pins have their own thread UI
   // interactive items (3D viewer, live embed, card/code editors) own the screen while active
   if (editingId && sel.some((i) => i.id === editingId && (i.type === 'ifc' || i.type === 'embed' || i.type === 'card' || i.type === 'code'))) return null
 
@@ -234,6 +236,15 @@ export function ContextBar() {
   const w = box.w * camera.z, h = box.h * camera.z
   const above = tl.y - 58
   const top = above > 62 ? above : Math.min(viewport.h - 60, tl.y + h + 44)
-  const cx = Math.max(200, Math.min(viewport.w - 200, tl.x + w / 2))
-  return <div className="wc-ui" style={{ left: cx, top, transform: 'translateX(-50%)', zIndex: 25 }}>{bar}</div>
+  return <Floating cx={tl.x + w / 2} top={top} viewportW={viewport.w}>{bar}</Floating>
+}
+
+/** Keeps the bar fully on screen and clear of the tool rail, whatever its width. */
+function Floating({ cx, top, viewportW, children }: { cx: number; top: number; viewportW: number; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(360)
+  useLayoutEffect(() => { const w = ref.current?.offsetWidth; if (w && Math.abs(w - width) > 1) setWidth(w) })
+  const min = 72 + width / 2, max = viewportW - 12 - width / 2
+  const x = max < min ? viewportW / 2 : Math.max(min, Math.min(max, cx))
+  return <div ref={ref} className="wc-ui" style={{ left: x, top, transform: 'translateX(-50%)', zIndex: 25, maxWidth: viewportW - 90 }}>{children}</div>
 }

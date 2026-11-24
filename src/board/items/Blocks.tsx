@@ -1,9 +1,12 @@
-import { Suspense, lazy, useLayoutEffect, useRef } from 'react'
+import { Suspense, lazy, useLayoutEffect, useRef, useState } from 'react'
 import { Box as BoxIcon, Calendar, Download, ExternalLink, FileText, Globe, MousePointerClick, User } from 'lucide-react'
 import { formatBytes } from '../../lib/util'
-import { resolveAsset, useAsset } from '../assets'
+import { downloadUrl, useAsset } from '../assets'
 import { inkOn } from '../defaults'
+import { providerEmbed } from '../embeds'
 import { S, apply, update, useBoard } from '../store'
+import { safeHttpUrl } from '../validate'
+import { finishEditing } from './RichText'
 import type { CardItem, ChartItem, CodeItem, EmbedItem, FileItem, IfcItem, TableItem } from '../types'
 import { textCss } from './RichText'
 
@@ -11,50 +14,70 @@ const IfcViewer = lazy(() => import('../ifc/IfcViewer'))
 
 // ---------- embed ----------
 
+/** Embeds the viewer chose to load this session (unknown sites never load on their own). */
+const approved = new Set<string>()
+export const approveEmbed = (id: string) => approved.add(id)
+
 export function EmbedView({ it, active }: { it: EmbedItem; active: boolean }) {
   const big = useBoard((s) => it.w * s.camera.z > 150)
+  const mine = useBoard((s) => !!it.by && it.by === s.me.id)
+  const [ok, setOk] = useState(() => approved.has(it.id))
+  const url = safeHttpUrl(it.url)
+  const src = safeHttpUrl(it.src || it.url)
   const host = (() => { try { return new URL(it.url).hostname.replace(/^www\./, '') } catch { return it.site || '' } })()
   if (it.kind === 'link') {
     return (
       <div className="wc-linkcard">
-        {it.thumb && <div className="wc-linkcard-thumb" style={{ backgroundImage: `url(${JSON.stringify(it.thumb).slice(1, -1)})` }} />}
+        {it.thumb && /^https:\/\//i.test(it.thumb) && <div className="wc-linkcard-thumb"><img src={it.thumb} alt="" loading="lazy" referrerPolicy="no-referrer" draggable={false} /></div>}
         <div className="wc-linkcard-body">
           <div className="wc-linkcard-title">{it.title || it.url}</div>
           {it.desc && <div className="wc-linkcard-desc">{it.desc}</div>}
-          <a className="wc-linkcard-url" data-interactive href={it.url} target="_blank" rel="noreferrer noopener">
-            <Globe size={12} /> {host} <ExternalLink size={12} />
-          </a>
+          {url && (
+            <a className="wc-linkcard-url" data-interactive href={url} target="_blank" rel="noreferrer noopener">
+              <Globe size={12} /> {host} <ExternalLink size={12} />
+            </a>
+          )}
         </div>
       </div>
     )
   }
+  // Well-known providers and embeds you added yourself load straight away; anything else waits for a click,
+  // so a collaborator cannot make your browser load an arbitrary site just by placing it on the board.
+  const trusted = it.kind === 'html' || mine || ok || (!!url && !!providerEmbed(url))
   return (
     <div className="wc-embed">
       <div className="wc-embed-bar">
         <Globe size={12} />
         <span className="truncate">{it.title || host || 'Embed'}</span>
-        {it.kind !== 'html' && (
-          <a data-interactive href={it.url} target="_blank" rel="noreferrer noopener" title="Open in a new tab"><ExternalLink size={12} /></a>
+        {it.kind !== 'html' && url && (
+          <a data-interactive href={url} target="_blank" rel="noreferrer noopener" title="Open in a new tab" aria-label="Open in a new tab"><ExternalLink size={12} /></a>
         )}
       </div>
       <div className="wc-embed-frame">
-        {big ? (
-          it.kind === 'html' ? (
-            <iframe title={it.title || 'Embed'} srcDoc={it.html} sandbox="allow-scripts allow-popups allow-forms" loading="lazy" />
-          ) : (
-            <iframe
-              title={it.title || host}
-              src={it.src || it.url}
-              sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-presentation allow-downloads"
-              allow="fullscreen; clipboard-write; encrypted-media; picture-in-picture; xr-spatial-tracking"
-              referrerPolicy="strict-origin-when-cross-origin"
-              loading="lazy"
-            />
-          )
-        ) : (
+        {!big ? (
           <div className="wc-placeholder"><Globe size={28} /><span>{it.title || host}</span></div>
+        ) : it.kind === 'html' ? (
+          // Pasted HTML is shown as static markup only: no scripts, no forms, no navigation.
+          <iframe title={it.title || 'HTML snippet'} srcDoc={it.html} sandbox="" loading="lazy" />
+        ) : !src ? (
+          <div className="wc-placeholder"><Globe size={28} /><span>This link cannot be embedded</span></div>
+        ) : trusted ? (
+          <iframe
+            title={it.title || host}
+            src={src}
+            sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-presentation"
+            allow="fullscreen; clipboard-write; encrypted-media; picture-in-picture"
+            referrerPolicy="strict-origin-when-cross-origin"
+            loading="lazy"
+          />
+        ) : (
+          <div className="wc-placeholder">
+            <Globe size={28} />
+            <span>{host}</span>
+            <button className="wc-btn is-line" data-interactive onClick={() => { approved.add(it.id); setOk(true) }}>Load this site</button>
+          </div>
         )}
-        {!active && (
+        {!active && big && trusted && (
           <div className="wc-embed-cover">
             <span><MousePointerClick size={13} /> Double-click to interact</span>
           </div>
@@ -82,7 +105,7 @@ export function IfcView({ it, active }: { it: IfcItem; active: boolean }) {
             <BoxIcon size={12} /> <span className="truncate">{it.name}</span>
             {it.size ? <em>{formatBytes(it.size)}</em> : null}
           </div>
-          <button className="wc-ifc-open" data-interactive onClick={() => useBoard.setState({ editingId: it.id, selection: [it.id] })}>
+          <button className="wc-ifc-open" data-interactive onClick={() => useBoard.setState({ editingId: it.id, selection: [it.id] })} aria-label={`Open 3D model ${it.name}`}>
             Open 3D
           </button>
         </>
@@ -97,16 +120,16 @@ export function CardView({ it, editing }: { it: CardItem; editing: boolean }) {
   const set = (p: Partial<CardItem>) => update(it.id, p)
   if (editing) {
     return (
-      <div className="wc-card is-edit" data-editing="true" style={{ borderLeftColor: it.fill }} onKeyDown={(e) => e.stopPropagation()}>
-        <input autoFocus className="wc-card-title" placeholder="Title" value={it.title} onChange={(e) => set({ title: e.target.value })} />
-        <textarea placeholder="Description" value={it.desc || ''} onChange={(e) => set({ desc: e.target.value })} rows={2} />
+      <div className="wc-card is-edit" data-editing="true" style={{ borderLeftColor: it.fill }} onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') finishEditing() }}>
+        <input autoFocus className="wc-card-title" aria-label="Title" placeholder="Title" maxLength={400} value={it.title} onChange={(e) => set({ title: e.target.value })} />
+        <textarea aria-label="Description" placeholder="Description" maxLength={6000} value={it.desc || ''} onChange={(e) => set({ desc: e.target.value })} rows={2} />
         <div className="wc-card-row">
-          <input placeholder="Status" value={it.status || ''} onChange={(e) => set({ status: e.target.value })} />
-          <input placeholder="Assignee" value={it.assignee || ''} onChange={(e) => set({ assignee: e.target.value })} />
+          <input aria-label="Status" placeholder="Status" maxLength={80} value={it.status || ''} onChange={(e) => set({ status: e.target.value })} />
+          <input aria-label="Assignee" placeholder="Assignee" maxLength={120} value={it.assignee || ''} onChange={(e) => set({ assignee: e.target.value })} />
         </div>
         <div className="wc-card-row">
-          <input type="date" value={it.due || ''} onChange={(e) => set({ due: e.target.value })} />
-          <input placeholder="Tags, comma separated" value={(it.tags || []).join(', ')} onChange={(e) => set({ tags: e.target.value.split(',').map((t) => t.trim()).filter(Boolean) })} />
+          <input type="date" aria-label="Due date" value={it.due || ''} onChange={(e) => set({ due: e.target.value })} />
+          <input aria-label="Tags" placeholder="Tags, comma separated" value={(it.tags || []).join(', ')} onChange={(e) => set({ tags: e.target.value.split(',').map((t) => t.trim().slice(0, 60)).filter(Boolean).slice(0, 20) })} />
         </div>
       </div>
     )
@@ -134,7 +157,7 @@ function Cell({ it, r, c, editing }: { it: TableItem; r: number; c: number; edit
   const value = it.cells[r]?.[c] ?? ''
   useLayoutEffect(() => {
     const el = ref.current
-    if (el && document.activeElement !== el && el.textContent !== value) el.textContent = value
+    if (el && document.activeElement !== el && el.innerText !== value) el.innerText = value
   }, [value])
   return (
     <div
@@ -143,18 +166,24 @@ function Cell({ it, r, c, editing }: { it: TableItem; r: number; c: number; edit
       data-cell={`${r}:${c}`}
       contentEditable={editing}
       suppressContentEditableWarning
+      role={editing ? 'textbox' : undefined}
+      aria-label={`Row ${r + 1}, column ${c + 1}`}
       onFocus={() => { tableFocus.id = it.id; tableFocus.r = r; tableFocus.c = c }}
       onInput={(e) => {
         const cur = S().items[it.id] as TableItem
         const cells = cur.cells.map((row) => row.slice())
-        cells[r][c] = e.currentTarget.textContent || ''
+        cells[r][c] = (e.currentTarget.innerText || '').replace(/\n$/, '').slice(0, 6000)
         update(it.id, { cells })
       }}
+      onPaste={(e) => { e.preventDefault(); e.stopPropagation(); document.execCommand('insertText', false, e.clipboardData.getData('text/plain')) }}
       onKeyDown={(e) => {
-        if (e.key !== 'Tab') return
+        if (e.key === 'Enter' && e.shiftKey) { e.preventDefault(); document.execCommand('insertLineBreak'); return }
+        if (e.key !== 'Tab' && e.key !== 'Enter') return
         e.preventDefault()
         const cols = it.colW.length
-        let nr = r, nc = c + (e.shiftKey ? -1 : 1)
+        let nr = r, nc = c
+        if (e.key === 'Enter') nr++ // like a spreadsheet: Enter moves down, Shift+Enter adds a line
+        else nc += e.shiftKey ? -1 : 1
         if (nc >= cols) { nc = 0; nr++ }
         if (nc < 0) { nc = cols - 1; nr-- }
         const next = e.currentTarget.closest('.wc-table')?.querySelector<HTMLElement>(`[data-cell="${nr}:${nc}"]`)
@@ -172,7 +201,7 @@ export function TableView({ it, editing }: { it: TableItem; editing: boolean }) 
     <div
       className="wc-table"
       data-editing={editing ? 'true' : undefined}
-      onKeyDown={(e) => { if (editing) { e.stopPropagation(); if (e.key === 'Escape') (document.activeElement as HTMLElement)?.blur() } }}
+      onKeyDown={(e) => { if (editing) { e.stopPropagation(); if (e.key === 'Escape') { (document.activeElement as HTMLElement)?.blur(); finishEditing() } } }}
       style={{ ...css, gridTemplateColumns: it.colW.map((w) => `${w * sx}px`).join(' '), background: it.fill || '#ffffff', borderColor: it.stroke || '#c9cbd1' }}
     >
       {it.cells.map((row, r) =>
@@ -187,6 +216,9 @@ export function TableView({ it, editing }: { it: TableItem; editing: boolean }) 
 }
 
 export function tableEdit(it: TableItem, op: 'addRow' | 'addCol' | 'delRow' | 'delCol') {
+  // a focused cell keeps its own text; release it so every cell re-reads the new data
+  const act = document.activeElement as HTMLElement | null
+  if (act?.closest?.('.wc-table')) act.blur()
   const r = tableFocus.id === it.id ? tableFocus.r : it.cells.length - 1
   const c = tableFocus.id === it.id ? tableFocus.c : it.colW.length - 1
   let cells = it.cells.map((row) => row.slice())
@@ -208,18 +240,21 @@ export function CodeView({ it, editing }: { it: CodeItem; editing: boolean }) {
     <div className={`wc-code ${dark ? 'is-dark' : ''}`} style={{ fontSize: it.fontSize || 13 }}>
       <div className="wc-code-bar">
         {editing ? (
-          <input data-editing="true" value={it.lang} onChange={(e) => update(it.id, { lang: e.target.value })} onKeyDown={(e) => e.stopPropagation()} placeholder="language" />
+          <input data-editing="true" aria-label="Language" maxLength={30} value={it.lang} onChange={(e) => update(it.id, { lang: e.target.value })} onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') finishEditing() }} placeholder="language" />
         ) : <span>{it.lang || 'text'}</span>}
       </div>
       {editing ? (
         <textarea
           autoFocus
           data-editing="true"
+          aria-label="Code"
           spellCheck={false}
+          maxLength={200000}
           value={it.code}
           onChange={(e) => update(it.id, { code: e.target.value })}
           onKeyDown={(e) => {
             e.stopPropagation()
+            if (e.key === 'Escape') { finishEditing(); return }
             if (e.key === 'Tab') {
               e.preventDefault()
               const t = e.currentTarget
@@ -251,7 +286,8 @@ export function FileView({ it }: { it: FileItem }) {
         data-interactive
         className="wc-icon-btn"
         title="Download"
-        onClick={async () => { const u = await resolveAsset(it.src); if (u) window.open(u, '_blank', 'noopener') }}
+        aria-label={`Download ${it.name}`}
+        onClick={async () => { const u = await downloadUrl(it.src, it.name); if (u) window.open(u, '_blank', 'noopener') }}
       >
         <Download size={16} />
       </button>
@@ -322,7 +358,7 @@ export function ChartView({ it }: { it: ChartItem }) {
   }
   return (
     <div className="wc-chart">
-      <svg width={W} height={H}>
+      <svg width={W} height={H} fontFamily="Inter, system-ui, sans-serif" role="img" aria-label={it.title || `${it.kind} chart`}>
         {it.title && <text x={14} y={22} fontSize={14} fontWeight={600} fill="#1c1e23">{it.title}</text>}
         {body}
       </svg>

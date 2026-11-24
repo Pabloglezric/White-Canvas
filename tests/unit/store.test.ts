@@ -78,12 +78,40 @@ describe('operations', () => {
   it('moves frame children and group members together', () => {
     const f = make.frame({ x: 0, y: 0 })
     const s1 = make.sticky({ x: 50, y: 50 }), s2 = make.sticky({ x: 2000, y: 0 }), s3 = make.sticky({ x: 2300, y: 0 })
-    addItems([f, s1, s2, s3])
+    addItems([f])
+    addItems([s1, s2, s3]) // items dropped onto an existing frame join it
     expect(S().items[s1.id].parent).toBe(f.id)
     expect(moveSet([f.id]).sort()).toEqual([f.id, s1.id].sort())
     useBoard.setState({ selection: [s2.id, s3.id] })
     groupSelection()
     expect(moveSet([s2.id]).sort()).toEqual([s2.id, s3.id].sort())
+  })
+  it('takes connectors along when both of their ends are selected', () => {
+    const a = make.shape({ x: 0, y: 0 }), b = make.shape({ x: 400, y: 0 }), other = make.shape({ x: 900, y: 0 })
+    const inside = make.connector({ item: a.id, x: 0, y: 0 }, { item: b.id, x: 0, y: 0 })
+    const outside = make.connector({ item: b.id, x: 0, y: 0 }, { item: other.id, x: 0, y: 0 })
+    addItems([a, b, other, inside, outside])
+    const set = moveSet([a.id, b.id])
+    expect(set).toContain(inside.id)
+    expect(set).not.toContain(outside.id)
+  })
+  it('ignores edits from people who may only view or comment', () => {
+    const s = make.sticky({ x: 0, y: 0 })
+    apply({ [s.id]: s })
+    useBoard.setState({ role: 'viewer' })
+    apply({ [s.id]: { ...S().items[s.id], x: 500 } })
+    expect(S().items[s.id].x).toBe(0)
+    useBoard.setState({ role: 'commenter' })
+    const c = make.comment({ x: 10, y: 10 })
+    apply({ [c.id]: c, [s.id]: null })
+    expect(S().items[c.id]).toBeDefined()
+    expect(S().items[s.id]).toBeDefined()
+  })
+  it('never lets a non-finite camera in', () => {
+    const before = S().camera
+    S().setCamera({ x: NaN, y: 0, z: 1 })
+    S().setCamera({ x: 0, y: 0, z: Infinity })
+    expect(S().camera).toEqual(before)
   })
   it('clones with fresh ids and remapped connector ends', () => {
     const a = make.shape({ x: 0, y: 0 }), b = make.shape({ x: 400, y: 0 })

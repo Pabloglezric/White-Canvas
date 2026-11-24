@@ -1,13 +1,35 @@
 // Asset storage. Cloud boards keep files in the private `board-assets` bucket (referenced as
-// `asset:<path>`); local boards keep blobs in IndexedDB (`local:<id>`).
+// `asset:<path>`); device-only boards keep blobs in IndexedDB (`local:<id>`).
 import { get, set } from 'idb-keyval'
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { uid } from '../lib/util'
 
-const cache = new Map<string, { url: string; exp: number }>()
+interface Signed { url: string; exp: number }
+const SIGN_SECONDS = 60 * 60 * 24 * 7
+const STORE_KEY = 'wc.assets.v1'
+const cache = new Map<string, Signed>()
 const inflight = new Map<string, Promise<string>>()
-const SIGN_SECONDS = 60 * 60 * 6
+const objectUrls = new Set<string>()
+
+// Signed links are remembered across sessions: the same link means the browser's HTTP cache can reuse
+// the download instead of fetching every image again on each visit.
+try {
+  const saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') as Record<string, Signed>
+  const now = Date.now()
+  for (const k in saved) if (saved[k] && saved[k].exp > now) cache.set(k, saved[k])
+} catch { /* storage unavailable */ }
+
+let persistTimer: ReturnType<typeof setTimeout> | undefined
+function persist() {
+  clearTimeout(persistTimer)
+  persistTimer = setTimeout(() => {
+    const out: Record<string, Signed> = {}
+    let n = 0
+    for (const [k, v] of [...cache].reverse()) { if (k.startsWith('asset:') && n++ < 500) out[k] = v }
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(out)) } catch { /* quota */ }
+  }, 800)
+}
 
 export const isLocalBoard = (id: string | null | undefined) => !!id && id.startsWith('local-')
 
@@ -23,12 +45,15 @@ export async function resolveAsset(src: string): Promise<string> {
       if (src.startsWith('local:')) {
         const blob = (await get(`wc.asset.${src.slice(6)}`)) as Blob | undefined
         const url = blob ? URL.createObjectURL(blob) : ''
+        if (url) objectUrls.add(url)
         cache.set(src, { url, exp: Infinity })
         return url
       }
       const { data, error } = await supabase.storage.from('board-assets').createSignedUrl(src.slice(6), SIGN_SECONDS)
       if (error || !data) return ''
-      cache.set(src, { url: data.signedUrl, exp: Date.now() + (SIGN_SECONDS - 600) * 1000 })
+      if (cache.size > 2000) for (const k of cache.keys()) { cache.delete(k); if (cache.size <= 1500) break }
+      cache.set(src, { url: data.signedUrl, exp: Date.now() + (SIGN_SECONDS - 3600) * 1000 })
+      persist()
       return data.signedUrl
     } finally {
       inflight.delete(src)
@@ -36,6 +61,20 @@ export async function resolveAsset(src: string): Promise<string> {
   })()
   inflight.set(src, p)
   return p
+}
+
+/** Frees device-local object URLs; called when a board closes. */
+export function releaseAssets() {
+  for (const url of objectUrls) URL.revokeObjectURL(url)
+  objectUrls.clear()
+  for (const [k] of cache) if (k.startsWith('local:')) cache.delete(k)
+}
+
+/** Forgets every remembered link (used on sign-out so the next person on this device starts clean). */
+export function forgetAssets() {
+  releaseAssets()
+  cache.clear()
+  try { localStorage.removeItem(STORE_KEY) } catch { /* ignore */ }
 }
 
 export function useAsset(src: string | undefined): string {
@@ -48,6 +87,13 @@ export function useAsset(src: string | undefined): string {
     return () => { live = false }
   }, [src])
   return url
+}
+
+/** A short-lived link that downloads the file instead of opening it in the browser. */
+export async function downloadUrl(src: string, name: string): Promise<string> {
+  if (!src.startsWith('asset:')) return resolveAsset(src)
+  const { data } = await supabase.storage.from('board-assets').createSignedUrl(src.slice(6), 300, { download: name || true })
+  return data?.signedUrl || ''
 }
 
 export async function uploadAsset(boardId: string, file: Blob, name = 'file'): Promise<string> {
@@ -65,6 +111,24 @@ export async function uploadAsset(boardId: string, file: Blob, name = 'file'): P
   return `asset:${path}`
 }
 
+/** A small preview of an image, used when it is tiny on screen. Returns null for small or undecodable images. */
+export async function makeThumb(file: Blob, max = 512): Promise<{ blob: Blob; w: number; h: number } | null> {
+  let bmp: ImageBitmap
+  try { bmp = await createImageBitmap(file) } catch { return null }
+  const w = bmp.width, h = bmp.height
+  if (Math.max(w, h) <= max * 2) { bmp.close(); return { blob: file, w, h } }
+  const k = max / Math.max(w, h)
+  const c = document.createElement('canvas')
+  c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k))
+  const ctx = c.getContext('2d')!
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(bmp, 0, 0, c.width, c.height)
+  bmp.close()
+  const blob = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/webp', 0.82))
+  c.width = c.height = 0
+  return blob ? { blob, w, h } : null
+}
+
 export async function fetchAssetBytes(src: string): Promise<ArrayBuffer> {
   if (src.startsWith('local:')) {
     const blob = (await get(`wc.asset.${src.slice(6)}`)) as Blob | undefined
@@ -72,6 +136,7 @@ export async function fetchAssetBytes(src: string): Promise<ArrayBuffer> {
     return blob.arrayBuffer()
   }
   const url = await resolveAsset(src)
+  if (!url) throw new Error('You no longer have access to this file')
   const res = await fetch(url)
   if (!res.ok) throw new Error(`Download failed (${res.status})`)
   return res.arrayBuffer()

@@ -1,6 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
-interface Props { children: ReactNode; fallback?: ReactNode | ((error: Error, reset: () => void) => ReactNode); name?: string }
+interface Props { children: ReactNode; fallback?: ReactNode | ((error: Error, reset: () => void) => ReactNode); name?: string; resetKey?: unknown }
 interface State { error: Error | null }
 
 /** Contains a rendering failure to one part of the UI instead of blanking the whole app. */
@@ -9,6 +9,10 @@ export class ErrorBoundary extends Component<Props, State> {
   static getDerivedStateFromError(error: Error): State { return { error } }
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error(`[White Canvas] ${this.props.name || 'component'} failed to render`, error, info.componentStack)
+  }
+  componentDidUpdate(prev: Props) {
+    // a changed item (or route) gets a fresh attempt
+    if (this.state.error && prev.resetKey !== this.props.resetKey) this.setState({ error: null })
   }
   reset = () => this.setState({ error: null })
   render() {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Check, ChevronLeft, ChevronRight, CloudOff, Download, Grid3x3, History, Keyboard, LayoutTemplate, ListTree,
@@ -14,9 +14,9 @@ import {
   ungroupSelection,
 } from '../ops'
 import {
-  S, apply, canComment, canEdit, fitAll, fitBox, orderedFrames, toast, useBoard, viewBox, zoomTo,
+  S, apply, canComment, canEdit, commit, fitAll, fitBox, mutate, orderedFrames, toast, useBoard, viewBox, zoomTo,
 } from '../store'
-import { broadcast, updateMeta } from '../sync'
+import { summon, updateMeta } from '../sync'
 import type { CommentItem, Item } from '../types'
 import { Pop, useNarrow } from './kit'
 
@@ -24,19 +24,26 @@ import { Pop, useNarrow } from './kit'
 
 function TimerChip() {
   const timer = useBoard((s) => s.meta?.settings.timer)
-  const [, tick] = useState(0)
-  const rang = useRef(false)
+  const [now, setNow] = useState(() => Date.now())
+  const endsAt = timer?.endsAt || 0
   useEffect(() => {
-    if (!timer?.endsAt) return
-    const t = setInterval(() => tick((n) => n + 1), 500)
+    if (!endsAt) return
+    setNow(Date.now())
+    const t = setInterval(() => setNow(Date.now()), 500)
     return () => clearInterval(t)
-  }, [timer?.endsAt])
-  if (!timer?.endsAt) return null
-  const left = Math.max(0, Math.round((timer.endsAt - Date.now()) / 1000))
-  if (left === 0 && !rang.current) { rang.current = true; toast('Time is up'); navigator.vibrate?.([120, 80, 120]) }
-  if (left > 0) rang.current = false
+  }, [endsAt])
+  const left = endsAt ? Math.max(0, Math.round((endsAt - now) / 1000)) : 0
+  const over = !!endsAt && now >= endsAt
+  // announce once, from an effect (never while rendering)
+  useEffect(() => {
+    if (!over || Date.now() - endsAt > 3000) return
+    toast('Time is up')
+    navigator.vibrate?.([120, 80, 120])
+  }, [over, endsAt])
+  // the chip clears itself shortly after the end instead of sitting at 0:00
+  if (!endsAt || now - endsAt > 8000) return null
   return (
-    <button className="wc-btn" title="Timer — click to stop" style={{ color: left <= 10 ? 'var(--danger)' : undefined, fontVariantNumeric: 'tabular-nums', fontWeight: 600 }} onClick={() => canEdit() && updateMeta({ settings: { timer: null } })}>
+    <button className="wc-btn" title="Timer — click to stop" aria-label={`Timer, ${Math.floor(left / 60)} minutes ${left % 60} seconds left. Click to stop`} style={{ color: left <= 10 ? 'var(--danger)' : undefined, fontVariantNumeric: 'tabular-nums', fontWeight: 600 }} onClick={() => canEdit() && updateMeta({ settings: { timer: null } })}>
       <Timer size={15} /> {Math.floor(left / 60)}:{String(left % 60).padStart(2, '0')}
     </button>
   )
@@ -120,7 +127,7 @@ export function TopBar() {
               <button data-close onClick={() => panel('versions')}><History size={16} /> Version history</button>
               {editor && <button data-close onClick={() => panel('facilitate')}><Timer size={16} /> Timer and voting</button>}
               {peerList.length > 0 && editor && (
-                <button data-close onClick={() => { broadcast('summon', { name: me.name, box: viewBox() }); toast('Everyone is now looking at your view') }}><Users size={16} /> Bring everyone to me</button>
+                <button data-close onClick={() => { summon(me.name, viewBox()); toast('Everyone is now looking at your view') }}><Users size={16} /> Bring everyone to me</button>
               )}
               <div className="wc-sep is-h" />
               <button onClick={() => S().setPrefs({ grid: grid === 'dots' ? 'lines' : grid === 'lines' ? 'none' : 'dots' })}><Grid3x3 size={16} /> Grid<kbd>{grid}</kbd></button>
@@ -143,18 +150,7 @@ export function TopBar() {
 export function ZoomBar() {
   const z = useBoard((s) => s.camera.z)
   const minimap = useBoard((s) => s.minimap)
-  const lost = useBoard((s) => {
-    // true when there is content but none of it is on screen
-    const ids = Object.keys(s.items)
-    if (!ids.length) return false
-    const v = { x: -s.camera.x / s.camera.z, y: -s.camera.y / s.camera.z, w: s.viewport.w / s.camera.z, h: s.viewport.h / s.camera.z }
-    for (const id of ids) {
-      const b = s.items[id]
-      if (b.type === 'connector') continue
-      if (b.x < v.x + v.w && b.x + b.w > v.x && b.y < v.y + v.h && b.y + b.h > v.y) return false
-    }
-    return true
-  })
+  const lost = useBoard((s) => s.lost)
   return (
     <>
       {minimap && <Minimap />}
@@ -173,14 +169,28 @@ export function ZoomBar() {
   )
 }
 
+const MinimapItems = memo(function MinimapItems({ items, stroke }: { items: Record<string, Item>; stroke: number }) {
+  const list = Object.values(items).filter((i) => i.type !== 'comment' && i.type !== 'connector')
+  // sample very large boards so the minimap stays cheap to draw
+  const step = Math.max(1, Math.ceil(list.length / 1200))
+  return (
+    <>
+      {list.filter((_, i) => i % step === 0).map((it) => (
+        <rect key={it.id} x={it.x} y={it.y} width={it.w} height={it.h} fill={it.type === 'frame' ? 'none' : 'fill' in it && it.fill && it.fill !== 'transparent' ? it.fill : '#b9bbc2'} stroke={it.type === 'frame' ? '#8f939d' : 'none'} strokeWidth={stroke} />
+      ))}
+    </>
+  )
+})
+
 function Minimap() {
   const items = useBoard((s) => s.items)
   const camera = useBoard((s) => s.camera)
   const viewport = useBoard((s) => s.viewport)
   const ref = useRef<HTMLDivElement>(null)
   const view = { x: -camera.x / camera.z, y: -camera.y / camera.z, w: viewport.w / camera.z, h: viewport.h / camera.z }
-  const list = Object.values(items).filter((i) => i.type !== 'comment' && i.type !== 'connector')
-  const box = unionBoxes([...list.map((i) => aabb(i)), view]) || view
+  // content bounds only change when items change, not on every camera frame
+  const content = useMemo(() => unionBoxes(Object.values(items).filter((i) => i.type !== 'comment' && i.type !== 'connector').map((i) => aabb(i))), [items])
+  const box = unionBoxes(content ? [content, view] : [view]) || view
   const pad = Math.max(box.w, box.h) * 0.05
   const vb = { x: box.x - pad, y: box.y - pad, w: box.w + pad * 2, h: box.h + pad * 2 }
   const go = (e: React.PointerEvent) => {
@@ -192,14 +202,12 @@ function Minimap() {
   }
   return (
     <div
-      ref={ref} className="wc-ui wc-minimap wc-surface"
+      ref={ref} className="wc-ui wc-minimap wc-surface" role="img" aria-label="Minimap: drag to move around the board"
       onPointerDown={(e) => { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); go(e) }}
       onPointerMove={(e) => { if (e.buttons) go(e) }}
     >
       <svg width="100%" height="100%" viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`} preserveAspectRatio="xMidYMid meet">
-        {list.slice(0, 1500).map((it) => (
-          <rect key={it.id} x={it.x} y={it.y} width={it.w} height={it.h} fill={it.type === 'frame' ? 'none' : 'fill' in it && it.fill && it.fill !== 'transparent' ? it.fill : '#b9bbc2'} stroke={it.type === 'frame' ? '#8f939d' : 'none'} strokeWidth={vb.w / 200} />
-        ))}
+        <MinimapItems items={items} stroke={Math.round(vb.w / 200)} />
         <rect x={view.x} y={view.y} width={view.w} height={view.h} fill="rgba(47,111,237,.12)" stroke="#2f6fed" strokeWidth={vb.w / 120} />
       </svg>
     </div>
@@ -240,7 +248,7 @@ export function ContextMenu() {
     pasteItems(undefined, ctx.world)
   }
   return (
-    <div ref={ref} className="wc-ui wc-surface wc-menu" style={{ left: pos?.x ?? ctx.x, top: pos?.y ?? ctx.y, zIndex: 65, visibility: pos ? 'visible' : 'hidden' }}>
+    <div ref={ref} role="menu" className="wc-ui wc-surface wc-menu wc-ctx" style={{ left: pos?.x ?? ctx.x, top: pos?.y ?? ctx.y, zIndex: 65, visibility: pos ? 'visible' : 'hidden' }}>
       {sel.length > 0 ? (
         <>
           {locked ? (
@@ -300,14 +308,16 @@ export function CommentThread() {
     last.current = id
     if (prev && prev !== id) {
       const old = S().items[prev] as CommentItem | undefined
-      if (old && old.type === 'comment' && !old.thread.length) apply({ [prev]: null })
+      // an abandoned empty thread disappears without leaving anything in undo history
+      if (old && old.type === 'comment' && !old.thread.length) { mutate({ [prev]: null }); commit({ history: false }) }
     }
     setText('')
   }, [id])
 
   if (!id || !it || it.type !== 'comment') return null
   const p = toScreen(camera, it.x, it.y)
-  const left = narrow ? 10 : Math.max(10, Math.min(viewport.w - 310, p.x + 22))
+  // beside the pin, never on top of it
+  const left = narrow ? 10 : p.x + 50 + 300 < viewport.w ? Math.max(10, p.x + 50) : Math.max(10, p.x - 320)
   const top = narrow ? undefined : Math.max(70, Math.min(viewport.h - 300, p.y - 40))
   const send = () => {
     const t = text.trim()
@@ -316,7 +326,7 @@ export function CommentThread() {
     setText('')
   }
   return (
-    <div className="wc-ui wc-thread wc-surface" style={narrow ? { left, right: 10, bottom: 'calc(76px + var(--sab))', width: 'auto' } : { left, top }}>
+    <div className="wc-ui wc-thread wc-surface" role="dialog" aria-label="Comment thread" style={narrow ? { left, right: 10, bottom: 'calc(76px + var(--sab))', width: 'auto' } : { left, top }}>
       <div className="wc-panel-head" style={{ padding: '8px 8px 8px 14px' }}>
         <span className="flex-1 text-sm">{it.thread.length ? 'Comment' : 'New comment'}</span>
         {it.thread.length > 0 && canComment() && (
@@ -340,7 +350,7 @@ export function CommentThread() {
       {canComment() && (
         <div className="wc-row p-2" style={{ borderTop: it.thread.length ? '1px solid var(--line)' : undefined }}>
           <textarea
-            autoFocus className="wc-input" rows={1} placeholder={it.thread.length ? 'Reply…' : 'Write a comment…'} value={text} style={{ resize: 'none', minHeight: 38 }}
+            autoFocus className="wc-input" rows={1} maxLength={4000} aria-label={it.thread.length ? 'Reply' : 'Comment'} placeholder={it.thread.length ? 'Reply…' : 'Write a comment…'} value={text} style={{ resize: 'none', minHeight: 38 }}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } if (e.key === 'Escape') useBoard.setState({ activeComment: null }) }}
           />
@@ -363,20 +373,36 @@ export function Presenter() {
     useBoard.setState({ presenting: n })
     if (frames[n]) fitBox(aabb(frames[n]), 24, true, 8)
   }
+  const f = frames[idx]
+  const cam = S().camera
+  const tl = f ? toScreen(cam, f.x, f.y) : null
   return (
-    <div className="wc-ui wc-surface wc-row" style={{ left: '50%', bottom: 'calc(14px + var(--sab))', transform: 'translateX(-50%)', padding: 4, zIndex: 50 }}>
+    <>
+    {/* everything outside the current frame is masked so only the slide shows */}
+    {f && tl && <PresenterMask />}
+    <div className="wc-ui wc-surface wc-row" role="toolbar" aria-label="Presentation" style={{ left: '50%', bottom: 'calc(14px + var(--sab))', transform: 'translateX(-50%)', padding: 4, zIndex: 50 }}>
       <button className="wc-btn" disabled={idx <= 0} onClick={() => go(idx - 1)} aria-label="Previous"><ChevronLeft size={18} /></button>
       <span className="px-2 text-sm whitespace-nowrap" style={{ fontVariantNumeric: 'tabular-nums' }}>{idx + 1} / {frames.length}<span className="wc-hide-narrow"> · {(frames[idx] as { title?: string })?.title}</span></span>
       <button className="wc-btn" disabled={idx >= frames.length - 1} onClick={() => go(idx + 1)} aria-label="Next"><ChevronRight size={18} /></button>
       <div className="wc-sep" />
       <button className="wc-btn" onClick={() => useBoard.setState({ presenting: null })}><X size={16} /> Exit</button>
     </div>
+    </>
   )
+}
+
+function PresenterMask() {
+  const camera = useBoard((s) => s.camera)
+  const f = useBoard((s) => (s.presenting != null ? orderedFrames(s.items)[s.presenting] : null))
+  if (!f) return null
+  const p = toScreen(camera, f.x, f.y)
+  return <div className="wc-present-mask" style={{ left: p.x, top: p.y, width: f.w * camera.z, height: f.h * camera.z }} />
 }
 
 export function Toast() {
   const t = useBoard((s) => s.toast)
-  return t ? <div className="wc-ui wc-toast" role="status">{t.text}</div> : null
+  // the live region is always present so screen readers announce new messages
+  return <div className="wc-ui wc-toast" role="status" aria-live="polite" style={t ? undefined : { visibility: 'hidden' }}>{t?.text}</div>
 }
 
 export function selectedItems(): Item[] {

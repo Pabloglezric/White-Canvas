@@ -8,6 +8,7 @@ import { bus } from '../board/interaction'
 import { useBoard } from '../board/store'
 import { closeBoard, openBoard } from '../board/sync'
 import { CommentThread, ContextMenu, Presenter, Toast, TopBar, ZoomBar } from '../board/ui/Chrome'
+import { CrashScreen, ErrorBoundary } from '../board/ui/ErrorBoundary'
 import { ContextBar } from '../board/ui/ContextBar'
 import { Panels } from '../board/ui/Panels'
 import { Toolbar } from '../board/ui/Toolbar'
@@ -44,18 +45,19 @@ export default function BoardPage() {
 
   if (status === 'denied' || status === 'error') {
     return (
-      <div className="wc-page" style={{ display: 'grid', placeItems: 'center', textAlign: 'center' }}>
+      <main className="wc-page" style={{ display: 'grid', placeItems: 'center', textAlign: 'center' }}>
         <div>
           <h1 className="text-xl font-semibold mb-2">{status === 'denied' ? 'This board is not available' : 'Could not load this board'}</h1>
           <p className="mb-4" style={{ color: 'var(--ink-2)' }}>{status === 'denied' ? 'It may have been deleted, or its owner has not shared it with you.' : 'Check your connection and try again.'}</p>
           <Link to="/" className="wc-btn is-accent">Back to boards</Link>
         </div>
-      </div>
+      </main>
     )
   }
 
   return (
-    <div className="wc-app" data-theme={theme}>
+    <ErrorBoundary name="board" resetKey={id} fallback={(error, reset) => <CrashScreen error={error} reset={reset} home />}>
+    <main className="wc-app" data-theme={theme}>
       <Canvas />
       <div className="wc-deck" />
       {status !== 'ready' && <div className="wc-ui" style={{ inset: 0, display: 'grid', placeItems: 'center', background: 'var(--canvas)', zIndex: 80 }}><div className="wc-spin" /></div>}
@@ -72,6 +74,7 @@ export default function BoardPage() {
       <ContextMenu />
       <Presenter />
       <Toast />
-    </div>
+    </main>
+    </ErrorBoundary>
   )
 }

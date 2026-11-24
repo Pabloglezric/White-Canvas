@@ -1,4 +1,5 @@
 // Pointer, touch, wheel and keyboard handling for the canvas.
+import { flushSync } from 'react-dom'
 import { getStroke } from 'perfect-freehand'
 import { round, uid } from '../lib/util'
 import { make } from './defaults'
@@ -6,7 +7,9 @@ import {
   aabb, center, connectorGeom, distToSegment, intersects, itemBox, rad, rotatePt, snapBox, strokeToPath, toScreen,
   toWorld, unionBoxes,
 } from './geometry'
+import { view } from './Canvas'
 import { finishEditing } from './items/RichText'
+import { hitOverview } from './overview'
 import {
   addItems, alignSelection, cloneItems, copySelection, deleteSelection, duplicateSelection, groupSelection, maxZ, moveSet,
   nudge, pasteItems, reorder, reparent, selectAll, toggleLock, ungroupSelection, withGroups,
@@ -48,13 +51,22 @@ export function activate(id: string) {
   if (it.locked) return
   const interactive = it.type === 'embed' || it.type === 'ifc'
   if (!interactive && !canEdit()) return
-  if (ACTIVATABLE.has(it.type)) useBoard.setState({ editingId: id, selection: [id] })
+  if (ACTIVATABLE.has(it.type)) startEditing(id)
+}
+
+/** Enters edit mode and renders at once, so the focus call lands inside the tap (needed for on-screen keyboards). */
+export function startEditing(id: string) {
+  const go = () => { useBoard.setState({ editingId: id, selection: [id] }); view.refresh?.() }
+  try { flushSync(go) } catch { go() }
 }
 
 function isTyping(e: Event) {
   const t = e.target as HTMLElement | null
   if (!t || !t.tagName) return false
-  return t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable
+  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable) return true
+  // Space and Enter belong to a focused button or link, not to the canvas shortcuts
+  const k = (e as KeyboardEvent).key
+  return (k === ' ' || k === 'Enter') && (t.tagName === 'BUTTON' || t.tagName === 'A' || t.getAttribute('role') === 'button')
 }
 
 function creationScale(z: number) {
@@ -72,6 +84,10 @@ export class Interaction {
   private longPress: ReturnType<typeof setTimeout> | undefined
   private inkRaf = 0
   private trackpadUntil = 0
+  private penDown = false
+  private lockedHit: string | null = null
+  private wheel = { dx: 0, dy: 0, zoom: 1, x: 0, y: 0, raf: 0 }
+  private gestureZ = 1
 
   constructor(private el: HTMLElement) {
     el.addEventListener('pointerdown', this.onDown)
@@ -84,6 +100,9 @@ export class Interaction {
     el.addEventListener('dragover', this.onDragOver)
     el.addEventListener('drop', this.onDrop)
     el.addEventListener('pointerleave', this.onLeave)
+    el.addEventListener('lostpointercapture', this.onLostCapture)
+    el.addEventListener('gesturestart', this.onGestureStart as EventListener)
+    el.addEventListener('gesturechange', this.onGestureChange as EventListener)
     window.addEventListener('keydown', this.onKey)
     window.addEventListener('keyup', this.onKeyUp)
     window.addEventListener('paste', this.onPaste)
@@ -102,6 +121,10 @@ export class Interaction {
     el.removeEventListener('dragover', this.onDragOver)
     el.removeEventListener('drop', this.onDrop)
     el.removeEventListener('pointerleave', this.onLeave)
+    el.removeEventListener('lostpointercapture', this.onLostCapture)
+    el.removeEventListener('gesturestart', this.onGestureStart as EventListener)
+    el.removeEventListener('gesturechange', this.onGestureChange as EventListener)
+    cancelAnimationFrame(this.wheel.raf)
     window.removeEventListener('keydown', this.onKey)
     window.removeEventListener('keyup', this.onKeyUp)
     window.removeEventListener('paste', this.onPaste)
@@ -117,15 +140,28 @@ export class Interaction {
   }
   private world(p: Pt): Pt { const c = S().camera; return toWorld(c, p.x, p.y) }
 
-  private hit(e: Event): Item | null {
-    const t = (e.target as HTMLElement).closest?.('[data-id]') as HTMLElement | null
-    return t ? S().items[t.dataset.id!] || null : null
+  /** Item under the pointer. Uses the real element under the point (pointer capture retargets events). */
+  private hit(e: { clientX: number; clientY: number }): Item | null {
+    const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null
+    const t = el?.closest?.('[data-id]') as HTMLElement | null
+    if (t) return S().items[t.dataset.id!] || null
+    if (view.overview && el?.closest('[data-canvas]')) return hitOverview(this.world(this.screen(e)), S().items, view.overview, S().camera.z)
+    return null
   }
 
   /** Topmost connectable item under a screen point. */
   private connectTarget(e: PointerEvent, exclude: string[]): Item | null {
-    const els = document.elementsFromPoint(e.clientX, e.clientY)
     const { items } = S()
+    if (view.overview) {
+      const w = this.world(this.screen(e))
+      for (let i = view.overview.length - 1; i >= 0; i--) {
+        const it = items[view.overview[i]]
+        if (!it || !CONNECTABLE.has(it.type) || it.type === 'frame' || exclude.includes(it.id)) continue
+        const q = it.rot ? rotatePt(w, center(it), -it.rot) : w
+        if (q.x >= it.x && q.x <= it.x + it.w && q.y >= it.y && q.y <= it.y + it.h) return it
+      }
+    }
+    const els = document.elementsFromPoint(e.clientX, e.clientY)
     for (const el of els) {
       const host = (el as HTMLElement).closest?.('[data-id]') as HTMLElement | null
       if (!host) continue
@@ -161,6 +197,7 @@ export class Interaction {
     rollback()
     this.setInk(null)
     useBoard.setState({ guides: [], marquee: null, connectHover: null })
+    this.el.classList.remove('is-panning')
     this.mode = { k: 'idle' }
   }
 
@@ -174,8 +211,16 @@ export class Interaction {
   private onDown = (e: PointerEvent) => {
     const target = e.target as HTMLElement
     if (target.closest('[data-interactive]') || target.closest('[data-editing="true"]')) return
+    // Right button: leave the event alone so the context menu fires on the item that was clicked.
+    if (e.button === 2) return
     const p = this.screen(e)
-    if (e.pointerType === 'touch') this.touches.set(e.pointerId, p)
+    if (e.pointerType === 'touch') {
+      // stops the follow-up synthetic mouse events, which would otherwise steal focus from a freshly opened editor
+      if (e.cancelable) e.preventDefault()
+      if (this.penDown) return // palm contact while the stylus is drawing
+      this.touches.set(e.pointerId, p)
+    }
+    if (e.pointerType === 'pen') this.penDown = true
     if (e.pointerType === 'pen' && !this.penSeen) {
       this.penSeen = true
       if (S().fingerDraws) { S().setPrefs({ fingerDraws: false }); toast('Stylus detected — fingers now pan while you draw') }
@@ -204,6 +249,7 @@ export class Interaction {
 
     const handle = target.closest('[data-handle]') as HTMLElement | null
     if (handle && canEdit()) { this.startHandle(handle.dataset.handle!, e, p, w); return }
+    this.lockedHit = null
 
     if (tool === 'select') { this.downSelect(e, p, w); return }
 
@@ -237,10 +283,18 @@ export class Interaction {
     }
   }
 
+  /** The gesture ended without a pointerup we could see (capture lost, button released outside, window blurred). */
+  private onLostCapture = (e: PointerEvent) => {
+    if (e.pointerId !== this.pid || this.mode.k === 'idle' || this.mode.k === 'pinch') return
+    // finish through the normal path so the work done so far is kept
+    this.onUp(e)
+  }
+
   private downSelect(e: PointerEvent, p: Pt, w: Pt) {
     const s = S()
     let it = this.hit(e)
-    if (it?.locked) it = null
+    // Locked items do not move; a plain click still selects them so they can be unlocked.
+    if (it?.locked) { this.lockedHit = it.id; it = null }
     const additive = e.shiftKey || e.ctrlKey || e.metaKey
     if (it) {
       const wasSelected = s.selection.includes(it.id)
@@ -264,9 +318,17 @@ export class Interaction {
     }
     if (e.pointerType === 'touch') {
       this.mode = { k: 'pan', p0: p, cam0: { x: s.camera.x, y: s.camera.y } }
+      const locked = this.lockedHit
       this.longPress = setTimeout(() => {
         if (this.mode.k === 'pan' && Math.hypot(this.last.x - p.x, this.last.y - p.y) < 8) {
           navigator.vibrate?.(8)
+          if (locked && S().items[locked]) {
+            // long-press on a locked item: show its menu (Unlock)
+            this.mode = { k: 'idle' }
+            this.lockedHit = null
+            useBoard.setState({ selection: [locked], ctxMenu: { x: p.x, y: p.y, world: w } })
+            return
+          }
           this.mode = { k: 'marquee', w0: w, base: [] }
           useBoard.setState({ selection: [], marquee: { x: w.x, y: w.y, w: 0, h: 0 } })
         }
@@ -309,6 +371,7 @@ export class Interaction {
   }
 
   private startPinch() {
+    if (this.penDown) return
     if (this.mode.k !== 'pinch') this.cancelGesture()
     const ids = [...this.touches.keys()].slice(0, 2) as [number, number]
     const a = this.touches.get(ids[0])!, b = this.touches.get(ids[1])!
@@ -336,6 +399,8 @@ export class Interaction {
     const w = this.world(p)
     if (e.pointerType !== 'touch') bus.cursor?.(w)
     if (m.k === 'idle' || e.pointerId !== this.pid) return
+    // the button was released somewhere we did not see: finish the gesture now
+    if (e.pointerType === 'mouse' && e.buttons === 0) { this.onUp(e); return }
     this.last = p
     const s = S()
     const z = s.camera.z
@@ -489,6 +554,7 @@ export class Interaction {
       const t = rad(o.rot || 0)
       const u = { x: Math.cos(t), y: Math.sin(t) }, v = { x: -Math.sin(t), y: Math.cos(t) }
       const c0 = center(o)
+      if (!(o.w > 0) || !(o.h > 0)) return
       const A = { x: c0.x - u.x * ((hx * o.w) / 2) - v.x * ((hy * o.h) / 2), y: c0.y - u.y * ((hx * o.w) / 2) - v.y * ((hy * o.h) / 2) }
       const d = { x: w.x - A.x, y: w.y - A.y }
       const min = o.type === 'text' ? 24 : o.type === 'frame' ? 60 : 12
@@ -511,6 +577,7 @@ export class Interaction {
       patch[o.id] = next
     } else {
       const b = m.box0
+      if (!(b.w > 0) || !(b.h > 0)) return
       const ax = hx > 0 ? b.x : b.x + b.w, ay = hy > 0 ? b.y : b.y + b.h
       const k = Math.max(0.05, Math.max(hx ? ((w.x - ax) * hx) / b.w : 0, hy ? ((w.y - ay) * hy) / b.h : 0))
       for (const id of m.ids) {
@@ -608,6 +675,7 @@ export class Interaction {
 
   private onUp = (e: PointerEvent) => {
     this.touches.delete(e.pointerId)
+    if (e.pointerType === 'pen') this.penDown = false
     try { this.el.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
     const m = this.mode
     if (m.k === 'pinch') { if (this.touches.size < 2) this.mode = { k: 'idle' }; return }
@@ -634,8 +702,15 @@ export class Interaction {
         break
       }
       case 'marquee':
-        useBoard.setState({ marquee: null })
+      case 'pan': {
+        if (m.k === 'marquee') useBoard.setState({ marquee: null })
+        // a click (no drag) on a locked item selects it, which offers Unlock
+        const locked = this.lockedHit
+        this.lockedHit = null
+        const start = m.k === 'pan' ? m.p0 : toScreen(s.camera, m.w0.x, m.w0.y)
+        if (locked && S().items[locked] && Math.hypot(p.x - start.x, p.y - start.y) < 5) useBoard.setState({ selection: [locked] })
         break
+      }
       case 'resize': case 'rotate':
         commit()
         break
@@ -653,7 +728,8 @@ export class Interaction {
         const prec = s.camera.z < 0.5 ? 0 : 1
         const rel: number[] = []
         for (let i = 0; i < pts.length; i += 3) rel.push(round(pts[i] - x1, prec), round(pts[i + 1] - y1, prec), round(pts[i + 2], 2))
-        const bw = Math.max(1, x2 - x1), bh = Math.max(1, y2 - y1)
+        // never thinner than the pen itself, so later resizing scales sensibly
+        const bw = Math.max(m.size, x2 - x1), bh = Math.max(m.size, y2 - y1)
         const it: DrawItem = {
           id: uid(), type: 'draw', x: x1, y: y1, w: bw, h: bh, w0: bw, h0: bh, rot: 0, z: 0, rev: 0,
           pts: rel, stroke: m.color, size: round(m.size, 2), tool: m.tool, parent: null,
@@ -666,6 +742,12 @@ export class Interaction {
         break
       case 'create': {
         let id = m.id
+        if (id) {
+          // a drag too small to be deliberate counts as a click
+          const made0 = S().items[id]
+          const min = 24 / s.camera.z
+          if (made0 && m.tool !== 'sticky' && (made0.w < min || (m.tool !== 'text' && made0.h < min))) { mutate({ [id]: null }); id = null }
+        }
         if (!id) {
           const it = this.newItem(m.tool, m.w0, creationScale(s.camera.z))
           if (!it) break
@@ -687,11 +769,12 @@ export class Interaction {
           }
           if (Object.keys(patch).length) mutate(patch)
         }
-        commit()
+        // text and comments stay uncommitted until they have content, so abandoning one leaves no trace
+        if (m.tool !== 'comment' && m.tool !== 'text') commit()
         this.afterTool()
         if (m.tool === 'comment') useBoard.setState({ activeComment: id, selection: [] })
         else if (m.tool === 'frame' || m.tool === 'table') useBoard.setState({ selection: [id] })
-        else useBoard.setState({ selection: [id], editingId: id })
+        else startEditing(id)
         break
       }
       case 'connect': {
@@ -725,17 +808,35 @@ export class Interaction {
     const [ax, ay] = dot.side === 'l' ? [1, 0.5] : dot.side === 'r' ? [0, 0.5] : dot.side === 't' ? [0.5, 1] : [0.5, 0]
     mutate({ [clone.id]: clone, [c.id]: { ...c, b: { item: clone.id, ax, ay, x: clone.x, y: clone.y } } })
     commit()
-    useBoard.setState({ selection: [clone.id], editingId: 'html' in clone ? clone.id : null })
+    if ('html' in clone) startEditing(clone.id)
+    else useBoard.setState({ selection: [clone.id] })
   }
 
   private onCancel = (e: PointerEvent) => {
     this.touches.delete(e.pointerId)
+    if (e.pointerType === 'pen') this.penDown = false
     if (this.mode.k === 'pinch') { if (this.touches.size < 2) this.mode = { k: 'idle' }; return }
     if (e.pointerId === this.pid) this.cancelGesture()
   }
 
   private onLeave = () => { bus.cursor?.(null) }
-  private onBlur = () => { this.space = false; this.el.classList.remove('can-pan') }
+  private onBlur = () => {
+    this.space = false
+    this.penDown = false
+    this.touches.clear()
+    this.el.classList.remove('can-pan')
+    // keep what the gesture did so far rather than leaving the canvas stuck mid-drag
+    if (this.mode.k === 'pinch') this.mode = { k: 'idle' }
+    else if (this.mode.k !== 'idle') this.onUp(new PointerEvent('pointerup', { pointerId: this.pid, clientX: this.last.x + this.el.getBoundingClientRect().left, clientY: this.last.y + this.el.getBoundingClientRect().top }))
+  }
+
+  // Safari sends trackpad pinches as gesture events rather than ctrl+wheel.
+  private onGestureStart = (e: Event & { scale?: number }) => { e.preventDefault(); this.gestureZ = S().camera.z }
+  private onGestureChange = (e: Event & { scale?: number; clientX?: number; clientY?: number }) => {
+    e.preventDefault()
+    const p = this.screen({ clientX: e.clientX || 0, clientY: e.clientY || 0 })
+    zoomAt(p.x, p.y, (this.gestureZ * (e.scale || 1)) / S().camera.z)
+  }
 
   // ---------- wheel ----------
 
@@ -747,22 +848,34 @@ export class Interaction {
     if (s.following) useBoard.setState({ following: null })
     const p = this.screen(e)
     const unit = e.deltaMode === 1 ? 33 : 1
-    if (e.ctrlKey || e.metaKey) { zoomAt(p.x, p.y, Math.exp(-e.deltaY * unit * 0.01)); return }
     const now = performance.now()
     const wd = (e as WheelEvent & { wheelDeltaY?: number }).wheelDeltaY
     const mouseLike = e.deltaMode === 1 || (e.deltaX === 0 && wd != null && wd !== 0 && Math.abs(wd) % 120 === 0)
-    if (!mouseLike) this.trackpadUntil = now + 350
+    if (!mouseLike && !e.ctrlKey) this.trackpadUntil = now + 350
     const mouse = s.navMode === 'mouse' || (s.navMode === 'auto' && mouseLike && now > this.trackpadUntil)
-    if (mouse && !e.shiftKey) zoomAt(p.x, p.y, Math.exp(-e.deltaY * unit * 0.0016))
-    else if (mouse) s.setCamera({ ...s.camera, x: s.camera.x - e.deltaY * unit })
-    else s.setCamera({ ...s.camera, x: s.camera.x - e.deltaX * unit, y: s.camera.y - e.deltaY * unit })
+    const acc = this.wheel
+    acc.x = p.x; acc.y = p.y
+    if (e.ctrlKey || e.metaKey) {
+      // trackpad pinch arrives as small ctrl+wheel deltas; a mouse wheel notch is ~100 and gets a gentler step
+      acc.zoom *= mouseLike ? Math.exp(-e.deltaY * unit * 0.0022) : Math.exp(-Math.max(-40, Math.min(40, e.deltaY * unit)) * 0.01)
+    } else if (mouse && !e.shiftKey) acc.zoom *= Math.exp(-e.deltaY * unit * 0.0016)
+    else if (mouse) acc.dx -= e.deltaY * unit
+    else { acc.dx -= e.deltaX * unit; acc.dy -= e.deltaY * unit }
+    // several wheel events can arrive per frame; apply them once
+    if (!acc.raf) acc.raf = requestAnimationFrame(() => {
+      acc.raf = 0
+      if (acc.zoom !== 1) zoomAt(acc.x, acc.y, acc.zoom)
+      if (acc.dx || acc.dy) { const c = S().camera; S().setCamera({ x: c.x + acc.dx, y: c.y + acc.dy, z: c.z }) }
+      acc.dx = 0; acc.dy = 0; acc.zoom = 1
+    })
   }
 
   private onDbl = (e: MouseEvent) => {
     const s = S()
     if (s.editingId || s.tool !== 'select' || s.presenting != null) return
-    const t = e.target as HTMLElement
-    if (t.closest('[data-interactive]') || t.closest('[data-handle]')) return
+    // pointer capture retargets the event, so look at what is really under the pointer
+    const t = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null) || (e.target as HTMLElement)
+    if (t.closest('[data-interactive]') || t.closest('[data-handle]') || t.closest('.wc-ui')) return
     const it = this.hit(e)
     if (it) { if (!it.locked) activate(it.id); return }
     if (!canEdit()) return
@@ -770,7 +883,7 @@ export class Interaction {
     const k = creationScale(s.camera.z)
     const text = make.text({ x: w.x, y: w.y - 14 * k, fontSize: 20 * k, autoW: true, w: 8, h: 28 * k })
     addItems([text], { commit: false })
-    useBoard.setState({ editingId: text.id })
+    startEditing(text.id)
   }
 
   private onContext = (e: MouseEvent) => {
@@ -825,12 +938,14 @@ export class Interaction {
       // Keys that arrive before the editor has focus still belong to the text being edited.
       if (e.key.length === 1 && !mod) {
         const ch = e.key
-        const put = () => {
+        // the editor may still be mounting: hold the character and deliver it as soon as it exists
+        const put = (tries: number) => {
           const el = document.querySelector<HTMLElement>('[data-editing="true"][data-rich]')
           if (el) { el.focus(); document.execCommand('insertText', false, ch) }
+          else if (tries > 0 && S().editingId) requestAnimationFrame(() => put(tries - 1))
         }
-        if (document.querySelector('[data-editing="true"][data-rich]')) { e.preventDefault(); put() }
-        else if (document.querySelector('[data-id="' + s.editingId + '"] [data-rich]')) { e.preventDefault(); requestAnimationFrame(put) }
+        const kind = s.items[s.editingId]?.type
+        if (kind === 'sticky' || kind === 'text' || kind === 'shape') { e.preventDefault(); put(4) }
       } else if (k === 'Escape') finishEditing()
       return
     }
@@ -865,8 +980,8 @@ export class Interaction {
         case '=': case '+': e.preventDefault(); zoomTo(s.camera.z * 1.25); return
         case '-': e.preventDefault(); zoomTo(s.camera.z / 1.25); return
         case '0': e.preventDefault(); zoomTo(1); return
-        case ']': e.preventDefault(); reorder(e.shiftKey ? 'front' : 'forward'); return
-        case '[': e.preventDefault(); reorder(e.shiftKey ? 'back' : 'backward'); return
+        case ']': case '}': e.preventDefault(); reorder(e.shiftKey ? 'front' : 'forward'); return
+        case '[': case '{': e.preventDefault(); reorder(e.shiftKey ? 'back' : 'backward'); return
       }
       return
     }
@@ -878,9 +993,26 @@ export class Interaction {
 
     switch (k) {
       case 'Escape':
-        if (this.mode.k !== 'idle') this.cancelGesture()
-        useBoard.setState({ selection: [], ctxMenu: null, activeComment: null, panel: null, tool: 'select', toolLock: false })
+        if (this.mode.k !== 'idle') { this.cancelGesture(); return }
+        // one layer at a time: an open popover or panel closes first and the selection is kept
+        if (document.querySelector('.wc-pop')) return
+        if (s.ctxMenu) { useBoard.setState({ ctxMenu: null }); return }
+        if (s.panel || s.activeComment) { useBoard.setState({ panel: null, activeComment: null }); return }
+        if (s.tool !== 'select') { useBoard.setState({ tool: 'select', toolLock: false }); return }
+        useBoard.setState({ selection: [] })
         return
+      case 'Tab': {
+        // keyboard path to every item: Tab walks the board in reading order
+        if (document.activeElement !== this.el && document.activeElement !== document.body) return
+        const list = Object.values(s.items).filter((i) => i.type !== 'connector' && i.type !== 'draw' && !i.locked).sort((a, b) => (Math.abs(a.y - b.y) > 40 ? a.y - b.y : a.x - b.x))
+        if (!list.length) return
+        e.preventDefault()
+        const at = list.findIndex((i) => i.id === s.selection[0])
+        const next = list[(at + (e.shiftKey ? -1 : 1) + list.length) % list.length]
+        useBoard.setState({ selection: [next.id] })
+        fitBox(itemBox(next, s.items), 220, true, Math.max(s.camera.z, 0.6))
+        return
+      }
       case 'Delete': case 'Backspace': e.preventDefault(); deleteSelection(); return
       case 'ArrowLeft': e.preventDefault(); s.selection.length ? nudge(e.shiftKey ? -10 : -1, 0) : s.setCamera({ ...s.camera, x: s.camera.x + 60 }); return
       case 'ArrowRight': e.preventDefault(); s.selection.length ? nudge(e.shiftKey ? 10 : 1, 0) : s.setCamera({ ...s.camera, x: s.camera.x - 60 }); return

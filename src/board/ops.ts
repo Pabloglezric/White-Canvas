@@ -68,6 +68,13 @@ export function moveSet(ids: string[], items = S().items): string[] {
   for (const id of [...out]) {
     if (items[id]?.type === 'frame') for (const c of childrenOf(id, items)) out.add(c.id)
   }
+  // a connector whose two ends are both in the set belongs with it (copy, duplicate, delete, move)
+  if (out.size > 1) {
+    for (const id in items) {
+      const it = items[id]
+      if (it.type === 'connector' && !out.has(id) && it.a.item && it.b.item && out.has(it.a.item) && out.has(it.b.item)) out.add(id)
+    }
+  }
   return [...out]
 }
 
@@ -313,4 +320,17 @@ export function setStyle(partial: Record<string, unknown>, ids = S().selection) 
   const patch: Patch = {}
   for (const id of ids) if (items[id] && !items[id].locked) patch[id] = { ...items[id], ...partial } as Item
   apply(patch)
+}
+
+/**
+ * A position for new content of the given size: the requested centre if that area is empty, otherwise the
+ * nearest free area to the right of everything on the board, so inserts never pile on top of existing work.
+ */
+export function freeSpot(at: Pt, w: number, h: number): Pt {
+  const { items } = S()
+  const taken = Object.values(items).filter((i) => i.type !== 'connector' && i.type !== 'frame' && i.type !== 'comment').map((i) => aabb(i))
+  const hit = (cx: number, cy: number) => taken.some((b) => cx - w / 2 < b.x + b.w + 20 && cx + w / 2 > b.x - 20 && cy - h / 2 < b.y + b.h + 20 && cy + h / 2 > b.y - 20)
+  if (!hit(at.x, at.y)) return at
+  const all = unionBoxes(taken)!
+  return { x: all.x + all.w + 120 + w / 2, y: at.y }
 }

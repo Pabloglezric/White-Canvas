@@ -8,7 +8,9 @@ export default function Login() {
   const { me } = useAuth()
   const nav = useNavigate()
   const [params] = useSearchParams()
-  const next = params.get('next') || '/'
+  // only ever redirect to a path inside this app
+  const wanted = params.get('next') || '/'
+  const next = /^\/(?!\/)[\w\-./?=&%]*$/.test(wanted) ? wanted : '/'
   const [mode, setMode] = useState<'in' | 'up' | 'reset'>('in')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -42,17 +44,17 @@ export default function Login() {
   }
 
   return (
-    <div className="wc-page" style={{ display: 'grid', placeItems: 'center' }}>
+    <main className="wc-page" style={{ display: 'grid', placeItems: 'center' }}>
       <div className="wc-surface" style={{ width: 'min(400px, 100%)', padding: 26 }}>
         <Logo />
         <h1 className="text-xl font-semibold mt-5 mb-1">{mode === 'in' ? 'Sign in' : mode === 'up' ? 'Create your account' : 'Reset password'}</h1>
         <p className="mb-4" style={{ color: 'var(--ink-2)' }}>Boards sync across your devices and can be shared with others.</p>
         {!hasSupabase && <p className="mb-3" style={{ color: 'var(--danger)' }}>Cloud sync is not configured for this build. You can still use boards stored on this device.</p>}
         <form className="flex flex-col gap-2.5" onSubmit={submit}>
-          {mode === 'up' && <input className="wc-input" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />}
-          <input className="wc-input" type="email" required placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
-          {mode !== 'reset' && <input className="wc-input" type="password" required minLength={6} placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'in' ? 'current-password' : 'new-password'} />}
-          {msg && <p className="text-sm" style={{ color: msg.ok ? 'var(--ok)' : 'var(--danger)' }}>{msg.text}</p>}
+          {mode === 'up' && <input className="wc-input" aria-label="Your name" maxLength={80} placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />}
+          <input className="wc-input" type="email" required aria-label="Email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+          {mode !== 'reset' && <input className="wc-input" type="password" required minLength={8} aria-label="Password" placeholder="Password (8+ characters)" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'in' ? 'current-password' : 'new-password'} />}
+          {msg && <p className="text-sm" role="alert" style={{ color: msg.ok ? 'var(--ok)' : 'var(--danger)' }}>{msg.text}</p>}
           <button className="wc-btn is-accent" style={{ height: 42 }} disabled={busy || !hasSupabase}>{busy ? 'Working…' : mode === 'in' ? 'Sign in' : mode === 'up' ? 'Create account' : 'Send reset link'}</button>
         </form>
         <div className="flex flex-wrap gap-x-4 gap-y-1 mt-4 text-sm">
@@ -63,6 +65,6 @@ export default function Login() {
         <div className="wc-sep is-h" style={{ margin: '18px 0 14px' }} />
         <Link to="/" className="text-sm underline" style={{ color: 'var(--ink-2)' }}>Continue without an account — boards stay on this device</Link>
       </div>
-    </div>
+    </main>
   )
 }

@@ -10,16 +10,25 @@ import { STICKY_COLORS, make } from '../defaults'
 import { exportCsv, exportImage, exportJson, exportPdf } from '../export'
 import { aabb, itemBox, unionBoxes } from '../geometry'
 import { addEmbed, addStickiesFromLines, importFiles, pickFiles } from '../importers'
-import { addItems, cloneItems } from '../ops'
+import { addItems, cloneItems, freeSpot } from '../ops'
 import { S, apply, canEdit, fitBox, orderedFrames, toast, useBoard, viewCenter, type PanelId, type Patch } from '../store'
 import { listVersions, loadVersion, saveVersion, updateMeta, type Version } from '../sync'
 import { TEMPLATES } from '../templates'
 import type { CommentItem, Item } from '../types'
+import { confirmDialog } from './dialogs'
 import { Modal, Panel } from './kit'
 
 const close = () => useBoard.setState({ panel: null })
 
+const textCache = new WeakMap<Item, string>()
+/** Searchable text of an item, computed once per item version. */
 export function itemText(it: Item): string {
+  let t = textCache.get(it)
+  if (t === undefined) { t = rawText(it); textCache.set(it, t) }
+  return t
+}
+
+function rawText(it: Item): string {
   switch (it.type) {
     case 'sticky': case 'text': case 'shape': return htmlToText(it.html)
     case 'card': return [it.title, it.desc, it.status, it.assignee, ...(it.tags || [])].filter(Boolean).join(' ')
@@ -87,7 +96,7 @@ function InsertPanel() {
         onClick={() => {
           const rows = parseCsv(data).filter((r) => r.length >= 2 && Number.isFinite(parseFloat(r[1])))
           if (!rows.length) { toast('Use "label, number" on each line'); return }
-          const c = at()
+          const c = freeSpot(at(), 420, 280)
           addItems([make.chart({ x: c.x - 210, y: c.y - 140, labels: rows.map((r) => r[0].trim()), values: rows.map((r) => parseFloat(r[1])) })])
           setData(''); done()
         }}
@@ -146,7 +155,7 @@ function CommentsPanel() {
     .sort((a, b) => (b.thread[b.thread.length - 1]?.at || 0) - (a.thread[a.thread.length - 1]?.at || 0))
   return (
     <Panel title="Comments" onClose={close} actions={<label className="wc-row text-xs font-normal"><input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} /> Resolved</label>}>
-      {!threads.length && <p style={{ color: 'var(--ink-3)' }}>No comments yet. Pick the comment tool (C) and tap anywhere on the board.</p>}
+      {!threads.length && <p style={{ color: 'var(--ink-2)' }}>{Object.values(items).some((i) => i.type === 'comment' && i.thread.length) ? 'No open comments. Tick “Resolved” to see the ones that are done.' : 'No comments yet. Pick the comment tool (C) and tap anywhere on the board.'}</p>}
       {threads.map((c) => (
         <button key={c.id} className="wc-list-item" style={{ alignItems: 'flex-start', opacity: c.resolved ? 0.6 : 1 }} onClick={() => goTo(c)}>
           <span className="min-w-0 flex-1">
@@ -233,7 +242,7 @@ function VersionsPanel() {
   }
   const restore = async (v: Version) => {
     if (!canEdit()) return
-    if (!confirm(`Restore "${v.name || 'version'}" from ${new Date(v.created_at).toLocaleString()}? You can undo this.`)) return
+    if (!(await confirmDialog({ title: 'Restore this version?', message: `The board will go back to "${v.name || 'version'}" from ${new Date(v.created_at).toLocaleString()}. You can undo this.`, confirmLabel: 'Restore' }))) return
     try {
       const snap = await loadVersion(boardId, v.id)
       const patch: Patch = {}
