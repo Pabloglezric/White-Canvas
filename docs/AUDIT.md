@@ -135,7 +135,8 @@ Related gaps closed in the same pass:
 
 Checked with: 6 new unit tests, 2 new end-to-end tests (ratio tag, model zoom), and a signed-in run against a mocked backend for the dashboard move and the catch-up. Not exercised against the live backend: two real devices on one account, and live presence.
 
+Closed since: a duplicated cloud board (your own, or "Make my own copy" of a shared one) now gets its own copy of every image, PDF page, model and attachment, copied on the server into the new board's folder. Before, the copy read the original's files, so it broke when the original was deleted or sharing was turned off. If a file cannot be copied, the half-made copy is removed. The storage rules already allowed this (read on the original, write on your own board), checked against the live project's policies; 4 unit tests. Not exercised against the live backend.
+
 Still open:
 
-- Duplicating a cloud board shares its files with the original, so deleting the original breaks the copy's images.
 - Deleting or moving a device-only board does not free the device storage its files used.

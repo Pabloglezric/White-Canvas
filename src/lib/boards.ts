@@ -2,7 +2,7 @@
 import { get } from 'idb-keyval'
 import { supabase } from './supabase'
 import { uid } from './util'
-import { uploadAsset } from '../board/assets'
+import { copyAsset, uploadAsset } from '../board/assets'
 import { deleteLocalBoard, listVersions, loadVersion, localBoards, localItems, saveLocalBoards, saveLocalItems } from '../board/sync'
 import { cloneItems } from '../board/ops'
 import { thumbnailSvg } from '../board/export'
@@ -49,10 +49,23 @@ async function insertItems(boardId: string, items: Item[]) {
   await supabase.from('boards').update({ thumbnail: thumbnailSvg(Object.fromEntries(items.map((i) => [i.id, i]))) }).eq('id', boardId)
 }
 
-/** Uploads the device-only files a list of items points at into a cloud board, and repoints the items at the uploads. */
+/** The files an item points at: an image and its small preview, a model, an attachment. */
+const fileRefs = (it: Item): string[] => (it.type === 'image' ? [it.src, ...(it.thumb ? [it.thumb] : [])] : it.type === 'ifc' || it.type === 'file' ? [it.src] : [])
+
+/**
+ * Gives a cloud board its own copy of every file a list of items points at, and repoints the items at the copies:
+ * device-only files are uploaded, files in another cloud board's folder are copied on the server. Each file moves once.
+ */
 async function adoptAssets(boardId: string, items: Item[], moved: Map<string, string>): Promise<Item[]> {
+  const foreign = [...new Set(items.flatMap(fileRefs))].filter((s) => s.startsWith('asset:') && !s.startsWith(`asset:${boardId}/`) && !moved.has(s))
+  for (let i = 0; i < foreign.length; i += 6) {
+    // a few at a time; a batch is always allowed to finish, so a caller that cleans up after a failure sees every copy made
+    const batch = await Promise.allSettled(foreign.slice(i, i + 6).map(async (src) => { moved.set(src, await copyAsset(boardId, src)) }))
+    const failed = batch.find((r) => r.status === 'rejected')
+    if (failed) throw failed.reason
+  }
   const adopt = async (src: string, name: string): Promise<string> => {
-    if (!src.startsWith('local:')) return src
+    if (!src.startsWith('local:')) return moved.get(src) ?? src
     if (!moved.has(src)) {
       const blob = (await get(`wc.asset.${src.slice(6)}`)) as Blob | undefined
       // a file that has already gone missing on this device is left as it was; everything else moves
@@ -109,7 +122,16 @@ async function boardItems(b: BoardRow): Promise<Item[]> {
 
 export async function duplicateBoard(b: BoardRow, cloud: boolean): Promise<string> {
   const items = cloneItems(await boardItems(b), 0, 0).map((it, i) => ({ ...it, z: it.z || i + 1 }))
-  return createBoard(`${b.title} (copy)`, cloud, items)
+  if (!cloud) return createBoard(`${b.title} (copy)`, false, items)
+  // a cloud copy gets its own files: it must outlive the original, and any access to it
+  const id = await createBoard(`${b.title} (copy)`, true)
+  try {
+    await insertItems(id, await adoptAssets(id, items, new Map()))
+  } catch (e) {
+    await deleteBoard({ id } as BoardRow).catch(() => {})
+    throw e
+  }
+  return id
 }
 
 export async function renameBoard(b: BoardRow, title: string) {

@@ -46,9 +46,13 @@ Missing boards across devices, doubled initials, IFC scroll zoom and stale ratio
 open are in `docs/AUDIT.md` (last section). Migration `0004_catch_up_index.sql` is applied to the live database.
 The fixes are on branch `claude/laughing-albattani-kmvv1g`; production updates when that is merged into the production branch.
 
+Duplicated cloud boards get their own files (`adoptAssets` in `src/lib/boards.ts`, `copyAsset` in `src/board/assets.ts`):
+anything that puts items into a cloud board from elsewhere should go through `adoptAssets`. Branch `claude/loving-bohr-s5ikwd`,
+built on top of the sync fixes.
+
 ## Tests
 
-- `npm run test:unit` — 62 tests (geometry, store, validation, sync).
+- `npm run test:unit` — 66 tests (geometry, store, validation, sync).
 - `npm run test:e2e` — 21 tests on the production build, device-only boards, desktop and two Fold touch sizes.
 - CI: `.github/workflows/ci.yml` runs type-check, unit tests, build and end-to-end tests on every push.
 - Profiling handle: set `localStorage["wc.debug"] = "1"` to expose `window.__wc`.

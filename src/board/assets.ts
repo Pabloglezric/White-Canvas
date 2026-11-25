@@ -111,6 +111,20 @@ export async function uploadAsset(boardId: string, file: Blob, name = 'file'): P
   return `asset:${path}`
 }
 
+/**
+ * Copies a cloud file into another cloud board's folder, on the server (nothing is downloaded). A file that is gone,
+ * or that this account can no longer read, is left pointing where it was.
+ */
+export async function copyAsset(boardId: string, src: string): Promise<string> {
+  const from = src.slice(6)
+  const path = `${boardId}/${uid()}.${/\.([a-z0-9]{1,8})$/i.exec(from)?.[1].toLowerCase() || 'bin'}`
+  const { error } = await supabase.storage.from('board-assets').copy(from, path)
+  if (!error) return `asset:${path}`
+  // the storage service answers "not found" both for a missing file and for one this account has no access to
+  if (error.status === 404 || error.statusCode === '404' || error.statusCode === 'NoSuchKey') return src
+  throw new Error(error.message)
+}
+
 /** A small preview of an image, used when it is tiny on screen. Returns null for small or undecodable images. */
 export async function makeThumb(file: Blob, max = 512): Promise<{ blob: Blob; w: number; h: number } | null> {
   let bmp: ImageBitmap
