@@ -356,6 +356,23 @@ export function orderedFrames(items = S().items) {
     .sort((a, b) => (Math.abs(a.y - b.y) > Math.min(a.h, b.h) * 0.5 ? a.y - b.y : a.x - b.x))
 }
 
+/**
+ * The people on the board, one entry per account. Someone signed in on two devices (or with two tabs open) is
+ * still one person, and your own other devices are not listed at all. `id` is the client to follow: the one
+ * heard from most recently.
+ */
+export function people(peers: Record<string, Peer>, meId: string): (Peer & { clients: string[] })[] {
+  const out = new Map<string, Peer & { clients: string[] }>()
+  for (const p of Object.values(peers)) {
+    if (p.user && p.user === meId) continue
+    const key = p.user || p.id
+    const cur = out.get(key)
+    if (!cur) out.set(key, { ...p, clients: [p.id] })
+    else out.set(key, { ...(p.seen > cur.seen ? p : cur), clients: [...cur.clients, p.id] })
+  }
+  return [...out.values()]
+}
+
 // Opt-in handle for automated tests and performance profiling (set localStorage "wc.debug" = "1").
 try {
   if (typeof window !== 'undefined' && localStorage.getItem('wc.debug') === '1') {

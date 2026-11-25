@@ -1,6 +1,6 @@
 # White Canvas — project state
 
-Last updated: 2026-11-24
+Last updated: 2026-11-25
 
 ## Live
 
@@ -20,6 +20,14 @@ Last updated: 2026-11-24
 - Share links require sign-in; opening one calls `join_board` and adds a membership (no anonymous enumeration).
 - Agent access through hashed personal tokens (`api_tokens`), edge function uses the service role.
 - Own visual identity; no reference-product branding or assets.
+- Device-only boards never upload on their own. A signed-in dashboard offers to move them into the account
+  (`moveToAccount` in `src/lib/boards.ts`); nothing moves without that click, because a device can be shared.
+- Presence is per device (client id); anything shown per person goes through `people()` in `src/board/store.ts`.
+- An open cloud board catches up from the server (`catchUp` in `src/board/sync.ts`: rows changed since the newest one
+  seen, deleted included) on going live, reconnect, coming back into view and coming back online.
+- A frame's preset is a field (`preset`), shown as a tag only while the proportions match (`framePreset`). Titles never carry it.
+- Anything inside the board that handles its own wheel must take the event in the capture phase with a native listener;
+  a React handler runs after the board has already zoomed.
 
 ## Audit (2026-11-24)
 
@@ -32,10 +40,16 @@ Full pre-launch audit and fix pass: see `docs/AUDIT.md` for findings, measuremen
 - Embeds from unknown sites load on click; pasted HTML never runs scripts.
 - Hosting sends a strict Content-Security-Policy (`vercel.json`). New third-party scripts need a deliberate policy change.
 
+## Sync follow-up (2026-11-25)
+
+Missing boards across devices, doubled initials, IFC scroll zoom and stale ratio tags: causes, fixes and what is still
+open are in `docs/AUDIT.md` (last section). Migration `0004_catch_up_index.sql` is applied to the live database.
+The fixes are on branch `claude/laughing-albattani-kmvv1g`; production updates when that is merged into the production branch.
+
 ## Tests
 
-- `npm run test:unit` — 56 tests (geometry, store, validation).
-- `npm run test:e2e` — 19 tests on the production build, device-only boards, desktop and two Fold touch sizes.
+- `npm run test:unit` — 62 tests (geometry, store, validation, sync).
+- `npm run test:e2e` — 21 tests on the production build, device-only boards, desktop and two Fold touch sizes.
 - CI: `.github/workflows/ci.yml` runs type-check, unit tests, build and end-to-end tests on every push.
 - Profiling handle: set `localStorage["wc.debug"] = "1"` to expose `window.__wc`.
 
@@ -51,3 +65,4 @@ per-board agent tokens.
 - Supabase → Authentication: leaked-password protection, secure password change, minimum length 8.
 - Custom SMTP (built-in mailer only reaches project members). Paid Supabase plan before relying on it (free projects pause).
 - Real-device checks: Fold 8 including Flex Mode, iOS Safari, on-screen keyboard.
+- After the sync fixes are live: on each device, press "Move them to my account" on the dashboard once, then confirm both devices list the same boards.

@@ -109,6 +109,7 @@ export interface FrameItem extends ItemBase {
   title: string
   fill: string
   hidden?: boolean
+  preset?: string // label of the FRAME_PRESETS entry this frame was made from
 }
 
 export interface ImageItem extends ItemBase {

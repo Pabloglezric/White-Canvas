@@ -14,7 +14,7 @@ import {
   ungroupSelection,
 } from '../ops'
 import {
-  S, apply, canComment, canEdit, commit, fitAll, fitBox, mutate, orderedFrames, toast, useBoard, viewBox, zoomTo,
+  S, apply, canComment, canEdit, commit, fitAll, fitBox, mutate, orderedFrames, people, toast, useBoard, viewBox, zoomTo,
 } from '../store'
 import { summon, updateMeta } from '../sync'
 import type { CommentItem, Item } from '../types'
@@ -55,7 +55,7 @@ export function TopBar() {
   const sync = useBoard((s) => s.syncState)
   const role = useBoard((s) => s.role)
   // re-render only when the roster changes, not on every cursor packet
-  const roster = useBoard((s) => Object.values(s.peers).map((p) => `${p.id}|${p.name}|${p.color}`).join(','))
+  const roster = useBoard((s) => Object.values(s.peers).map((p) => `${p.id}|${p.user}|${p.name}|${p.color}`).join(','))
   const following = useBoard((s) => s.following)
   const me = useBoard((s) => s.me)
   const theme = useBoard((s) => s.theme)
@@ -69,7 +69,8 @@ export function TopBar() {
   useEffect(() => setTitle(meta?.title || ''), [meta?.title])
   const editor = role === 'owner' || role === 'editor'
   const panel = (p: NonNullable<ReturnType<typeof S>['panel']>) => useBoard.setState({ panel: S().panel === p ? null : p, activeComment: null })
-  const peerList = useMemo(() => Object.values(S().peers), [roster]) // eslint-disable-line react-hooks/exhaustive-deps
+  // one avatar per person, however many devices they have open
+  const peerList = useMemo(() => people(S().peers, me.id), [roster, me.id]) // eslint-disable-line react-hooks/exhaustive-deps
   const syncLabel = { synced: 'All changes saved', saving: 'Saving…', offline: 'Offline — changes are kept on this device and sync when you reconnect', local: 'Stored on this device only' }[sync]
 
   const present = () => {
@@ -99,15 +100,18 @@ export function TopBar() {
         <TimerChip />
         {peerList.length > 0 && (
           <div className="wc-row px-1" style={{ gap: 0 }}>
-            {peerList.slice(0, narrow ? 2 : 5).map((p) => (
-              <button
-                key={p.id} className={`wc-avatar ${following === p.id ? 'is-following' : ''}`} style={{ background: p.color }}
-                title={following === p.id ? `Following ${p.name} — click to stop` : `${p.name} — click to follow`}
-                onClick={() => useBoard.setState({ following: following === p.id ? null : p.id })}
-              >
-                {initials(p.name)}
-              </button>
-            ))}
+            {peerList.slice(0, narrow ? 2 : 5).map((p) => {
+              const on = !!following && p.clients.includes(following)
+              return (
+                <button
+                  key={p.user || p.id} className={`wc-avatar ${on ? 'is-following' : ''}`} style={{ background: p.color }}
+                  title={on ? `Following ${p.name} — click to stop` : `${p.name} — click to follow`}
+                  onClick={() => useBoard.setState({ following: on ? null : p.id })}
+                >
+                  {initials(p.name)}
+                </button>
+              )
+            })}
             {peerList.length > (narrow ? 2 : 5) && <span className="wc-avatar" style={{ background: 'var(--ink-3)' }}>+{peerList.length - (narrow ? 2 : 5)}</span>}
           </div>
         )}

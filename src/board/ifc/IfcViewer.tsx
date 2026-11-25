@@ -237,6 +237,62 @@ export default function IfcViewer({ item }: { item: IfcItem }) {
     canvas.addEventListener('pointerdown', onDown)
     canvas.addEventListener('pointerup', onUp)
 
+    // Scrolling zooms the model toward whatever is under the pointer. The event is taken here, on the way down
+    // to the 3D canvas, so the board behind never zooms or pans at the same time.
+    const zoomRay = new THREE.Raycaster()
+    let anchor: { p: THREE.Vector3; x: number; y: number; until: number } | null = null
+    const dolly = (clientX: number, clientY: number, k: number) => {
+      if (!model || !(k > 0) || k === 1) return
+      const size = model.box.getSize(new THREE.Vector3()).length() || 10
+      if (k > 1 && camera.position.distanceTo(model.box.getCenter(new THREE.Vector3())) > size * 12) return // far enough
+      const now = performance.now()
+      // one anchor per scroll gesture: picking a point is costly on big models, and a steady target feels right
+      if (!anchor || now > anchor.until || Math.hypot(clientX - anchor.x, clientY - anchor.y) > 4) {
+        const r = canvas.getBoundingClientRect()
+        zoomRay.setFromCamera(new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1), camera)
+        const hit = zoomRay.intersectObjects(model.group.children, false).find((h) => !cutting || plane.distanceToPoint(h.point) >= 0)
+        // nothing under the pointer: aim at the depth of the orbit centre
+        anchor = { p: hit ? hit.point.clone() : zoomRay.ray.at(camera.position.distanceTo(controls.target), new THREE.Vector3()), x: clientX, y: clientY, until: 0 }
+      }
+      anchor.until = now + 250
+      const ahead = anchor.p.clone().sub(camera.position)
+      const pace = size * 0.004 * Math.min(1, Math.abs(Math.log(k)) / 0.16) // 0.16 is one notch of a mouse wheel
+      if (k < 1 && ahead.length() * (1 - k) < pace) {
+        // right up against a surface: keep a steady pace and pass through it instead of stalling in front of it
+        const move = (ahead.lengthSq() > 1e-12 ? ahead.normalize() : camera.getWorldDirection(new THREE.Vector3())).multiplyScalar(pace)
+        camera.position.add(move)
+        controls.target.add(move)
+        anchor = null
+      } else {
+        camera.position.sub(anchor.p).multiplyScalar(k).add(anchor.p)
+        controls.target.sub(anchor.p).multiplyScalar(k).add(anchor.p)
+      }
+      // keep a workable orbit radius however far in the view has gone
+      const off = camera.position.clone().sub(controls.target)
+      if (off.length() < size * 0.01) controls.target.copy(camera.position).add(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(size * 0.01))
+      dirty = true
+    }
+    const onWheel = (e: WheelEvent) => {
+      e.stopPropagation()
+      // lists inside the viewer scroll as usual; a pinch over them must not zoom the whole page
+      if (e.target !== canvas) { if (e.ctrlKey) e.preventDefault(); return }
+      e.preventDefault()
+      const d = Math.max(-300, Math.min(300, e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 300 : 1)))
+      dolly(e.clientX, e.clientY, Math.exp(d * (e.ctrlKey ? 0.01 : 0.0016))) // a trackpad pinch arrives as small ctrl+wheel steps
+    }
+    // Safari reports trackpad pinches as gesture events
+    let pinch = 1
+    const onGesture = (e: Event) => {
+      const g = e as Event & { scale?: number; clientX?: number; clientY?: number }
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.type === 'gesturechange' && g.scale) dolly(g.clientX || 0, g.clientY || 0, pinch / g.scale)
+      pinch = g.scale || 1
+    }
+    el.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    el.addEventListener('gesturestart', onGesture, true)
+    el.addEventListener('gesturechange', onGesture, true)
+
     return () => {
       dead = true
       cancelAnimationFrame(raf)
@@ -264,6 +320,9 @@ export default function IfcViewer({ item }: { item: IfcItem }) {
       ;(highlight.material as THREE.Material).dispose()
       canvas.removeEventListener('webglcontextlost', onLost)
       canvas.removeEventListener('webglcontextrestored', onRestored)
+      el.removeEventListener('wheel', onWheel, true)
+      el.removeEventListener('gesturestart', onGesture, true)
+      el.removeEventListener('gesturechange', onGesture, true)
       controls.dispose()
       renderer.dispose()
       renderer.forceContextLoss()
@@ -274,7 +333,7 @@ export default function IfcViewer({ item }: { item: IfcItem }) {
   const saveCut = (t: number | null) => { setCut(t); api.current?.setCut(t); update(item.id, { section: t } as Partial<IfcItem>) }
 
   return (
-    <div ref={host} data-editing="true" className="relative w-full h-full" style={{ touchAction: 'none' }} onKeyDown={(e) => e.stopPropagation()} onWheel={(e) => e.stopPropagation()}>
+    <div ref={host} data-editing="true" className="relative w-full h-full" style={{ touchAction: 'none' }} onKeyDown={(e) => e.stopPropagation()}>
       {(status || error) && <div className="wc-placeholder absolute inset-0" style={{ background: 'rgba(233,236,241,.92)' }} role="status">{error ? <span style={{ color: '#b3261e' }}>{error}</span> : <><div className="wc-spin" /><span>{status}</span></>}</div>}
       <div className="absolute left-2 top-2 flex gap-1 wc-surface" style={{ padding: 3, borderRadius: 10 }}>
         <button className="wc-icon-btn" title="Fit model" aria-label="Fit model" onClick={() => api.current?.fit()}><Maximize size={15} /></button>

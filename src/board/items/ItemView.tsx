@@ -3,7 +3,7 @@ import { getStroke } from 'perfect-freehand'
 import { Lock, MessageCircle, ThumbsUp } from 'lucide-react'
 import { initials } from '../../lib/util'
 import { useAsset } from '../assets'
-import { inkOn } from '../defaults'
+import { framePreset, inkOn } from '../defaults'
 import { capPath, connectorGeom, shapeInset, shapePath, strokeToPath } from '../geometry'
 import { S, apply, commit, isPending, patchSilent, toast, update, useBoard } from '../store'
 import { ErrorBoundary } from '../ui/ErrorBoundary'
@@ -227,6 +227,7 @@ function Connector({ it, editing }: { it: ConnectorItem; editing: boolean }) {
 // ---------- frame ----------
 
 function Frame({ it, editing }: { it: FrameItem; editing: boolean }) {
+  const tag = framePreset(it)
   return (
     <>
       <div className="wc-frame-body" style={{ background: it.fill === 'transparent' ? undefined : it.fill === '#ffffff' ? 'var(--frame)' : it.fill }} />
@@ -245,6 +246,7 @@ function Frame({ it, editing }: { it: FrameItem; editing: boolean }) {
         ) : (
           <span>{it.title}</span>
         )}
+        {tag && <em className="wc-frame-tag">{tag}</em>}
       </div>
     </>
   )

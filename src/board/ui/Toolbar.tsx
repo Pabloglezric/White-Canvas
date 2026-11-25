@@ -153,7 +153,7 @@ export function Toolbar() {
                   onClick={() => {
                     const c = freeSpot(viewCenter(), p.w, p.h)
                     const n = Object.values(S().items).filter((i) => i.type === 'frame').length + 1
-                    addItems([make.frame({ x: c.x - p.w / 2, y: c.y - p.h / 2, w: p.w, h: p.h, title: `${p.label} ${n}` })])
+                    addItems([make.frame({ x: c.x - p.w / 2, y: c.y - p.h / 2, w: p.w, h: p.h, title: `Frame ${n}`, preset: p.label })])
                     S().setTool('select'); setFly(null)
                   }}
                 >

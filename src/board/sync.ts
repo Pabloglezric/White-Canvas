@@ -14,7 +14,7 @@ import { S, adoptRev, applyRemote, fitAll, fitBox, hooks, isPending, replaceItem
 import type { BoardMeta, BoardSettings, Camera, Item, Peer, Pt, Role } from './types'
 import { normalizeItem, normalizeItems } from './validate'
 
-interface Row { id: string; board_id: string; data: Item; rev: number; deleted: boolean; client_id: string }
+interface Row { id: string; board_id: string; data: Item; rev: number; deleted: boolean; client_id: string; updated_at?: string }
 
 const LOCAL_LIST = 'wc.local.boards'
 // Offline copies are kept per account, so two people sharing a device never see each other's boards.
@@ -57,7 +57,7 @@ function restoreCamera(id: string) {
 async function fetchAllItems(boardId: string): Promise<Row[]> {
   const out: Row[] = []
   for (let from = 0; ; from += 1000) {
-    const { data, error } = await supabase.from('board_items').select('id,board_id,data,rev,deleted,client_id')
+    const { data, error } = await supabase.from('board_items').select('id,board_id,data,rev,deleted,client_id,updated_at')
       .eq('board_id', boardId).eq('deleted', false).order('id').range(from, from + 999)
     if (error) throw new Error(error.message)
     out.push(...((data || []) as Row[]))
@@ -161,7 +161,8 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   let meta: BoardMeta | null = null
   let role: Role | null = null
   let unreachable = false
-  try {
+  /** The board and our role on it, straight from the server. Throws when the server cannot be reached. */
+  const loadAccess = async () => {
     let res = await supabase.from('boards').select('*').eq('id', boardId).maybeSingle()
     if (!res.data && !res.error) {
       const joined = await supabase.rpc('join_board', { b: boardId })
@@ -170,11 +171,21 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     }
     if (res.error) throw new Error(res.error.message)
     meta = res.data as BoardMeta | null
+    role = null
     if (meta) {
       const r = await supabase.rpc('board_role', { b: boardId })
       if (r.error) throw new Error(r.error.message)
       role = (r.data as Role | null) || null
     }
+  }
+  const showAccess = () => {
+    if (!meta) return
+    useBoard.setState({ meta: { ...meta, settings: meta.settings || {} }, role: role || 'viewer' })
+    document.title = `${meta.title} · White Canvas`
+    try { localStorage.setItem(roleKey(boardId), role || 'viewer') } catch { /* ignore */ }
+  }
+  try {
+    await loadAccess()
   } catch {
     if (stale()) { cleanupBase(); return }
     unreachable = true
@@ -194,11 +205,11 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     useBoard.setState({ status: 'denied', items: {}, selection: [], editingId: null })
   }
   if (!unreachable && (!meta || !role)) { lockOut(); cleanupBase(); return }
-  if (meta) {
-    useBoard.setState({ meta: { ...meta, settings: meta.settings || {} }, role: role || 'viewer' })
-    document.title = `${meta.title} · White Canvas`
-    try { localStorage.setItem(roleKey(boardId), role || 'viewer') } catch { /* ignore */ }
-  }
+  showAccess()
+
+  // The newest server change seen so far; catching up later asks only for what changed after it.
+  let since = 0
+  const seen = (rows: Row[]) => { for (const r of rows) { const t = r.updated_at ? Date.parse(r.updated_at) : 0; if (t > since) since = t } }
 
   // outbox: edits that never reached the server
   const dirty = new Map<string, Row>()
@@ -215,6 +226,7 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       if (stale()) { cleanupBase(); return }
       const items: Record<string, Item> = {}
       const serverRev = new Map<string, number>()
+      seen(rows)
       for (const r of rows) {
         serverRev.set(r.id, r.rev)
         const it = normalizeItem({ ...r.data, id: r.id, rev: r.rev })
@@ -286,9 +298,11 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     }
   }
   const flushSoon = debounce(flush, 450)
-  const onOnline = () => { flush() }
+  // filled in once the live connection is set up further down
+  let catchUp: (force?: boolean) => void = () => {}
+  const onOnline = () => { flush(); catchUp(true) }
   const leave = () => { finishEditing(); flushSoon.flush(); saveOutbox.flush(); set(CACHE, Object.values(S().items)).catch(() => {}) }
-  const onHide = () => { if (document.visibilityState === 'hidden') leave(); else checkAccess() }
+  const onHide = () => { if (document.visibilityState === 'hidden') leave(); else { checkAccess(); catchUp() } }
   window.addEventListener('online', onOnline)
   window.addEventListener('pagehide', leave)
   document.addEventListener('visibilitychange', onHide)
@@ -450,6 +464,47 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     }
     if (ups.length || gone.length) { applyRemote(ups, gone); saveCache() }
   }
+
+  /**
+   * Asks the server what changed since we last heard from it, deletions included. Live updates are lost while a
+   * device sleeps, an installed app sits in the background or the connection drops; without this the board would
+   * stay out of date until it was reopened.
+   */
+  let catching = false
+  let caughtAt = 0
+  catchUp = async (force = false) => {
+    if (catching || !navigator.onLine || S().boardId !== boardId || (!force && Date.now() - caughtAt < 5000)) return
+    catching = true
+    try {
+      if (unreachable) {
+        // the board was opened from the saved copy; now that the server answers, get the real thing
+        try { await loadAccess() } catch { return }
+        if (S().boardId !== boardId) return
+        if (!meta || !role) { active?.close(); active = null; lockOut(); toast('You no longer have access to this board'); return }
+        unreachable = false
+        showAccess()
+      }
+      const from = new Date(Math.max(0, since - 15000)).toISOString() // overlap, in case writes landed out of order
+      for (let at = 0; ; at += 1000) {
+        const { data, error } = await supabase.from('board_items').select('id,board_id,data,rev,deleted,client_id,updated_at')
+          .eq('board_id', boardId).gte('updated_at', from).order('updated_at').order('id').range(at, at + 999)
+        if (error || S().boardId !== boardId) return
+        const rows = (data || []) as Row[]
+        seen(rows)
+        inbox.push(...rows)
+        drain()
+        if (rows.length < 1000) break
+      }
+      // the title, sharing and shared settings (timer, voting) may have changed too
+      const fresh = await supabase.from('boards').select('title,link_access,settings').eq('id', boardId).maybeSingle()
+      const cur = S().meta
+      if (fresh.data && cur && S().boardId === boardId) useBoard.setState({ meta: { ...cur, title: String(fresh.data.title || cur.title).slice(0, 200), link_access: fresh.data.link_access, settings: fresh.data.settings || {} } })
+      caughtAt = Date.now()
+      if (dirty.size) flush()
+      else if (S().syncState === 'offline') useBoard.setState({ syncState: 'synced' })
+    } catch { /* still unreachable: the next trigger tries again */ } finally { catching = false }
+  }
+
   const db = supabase.channel(`db:${boardId}`)
   db
     .on('postgres_changes', { event: '*', schema: 'public', table: 'board_items', filter: `board_id=eq.${boardId}` }, (payload) => {
@@ -463,7 +518,8 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       const cur = S().meta
       if (cur && b) useBoard.setState({ meta: { ...cur, title: String(b.title || cur.title).slice(0, 200), link_access: b.link_access, settings: b.settings || {} } })
     })
-    .subscribe()
+    // (re)connected: collect whatever changed between loading and going live, or while the connection was down
+    .subscribe((status) => { if (status === 'SUBSCRIBED') catchUp(true) })
   channels.db = db
 
   let lastCam = 0

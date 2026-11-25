@@ -7,7 +7,7 @@ import { make } from './defaults'
 import { addItems, freeSpot, parseClipboardItems, pasteItems } from './ops'
 import { normalizeItems, safeHttpUrl } from './validate'
 import { aabb, intersects, unionBoxes } from './geometry'
-import { S, fitBox, toast, viewBox } from './store'
+import { S, fitBox, toast, useBoard, viewBox } from './store'
 import type { EmbedItem, Item, Pt } from './types'
 
 const IMG_EXT = /\.(png|jpe?g|gif|webp|avif|svg)(\?.*)?$/i
@@ -225,6 +225,8 @@ export async function importFiles(files: File[], at: Pt) {
     const box = unionBoxes(created.map((c) => aabb(c)))
     if (box && !intersects(viewBox(), box)) fitBox(box, 80)
     toast(`Added ${created.filter((c) => c.type !== 'frame').length} item${created.length > 1 ? 's' : ''}`)
+    // a model added on its own opens straight away: it can be orbited and zoomed at once, and the board gets a real preview
+    if (created.length === 1 && created[0].type === 'ifc') useBoard.setState({ editingId: created[0].id, selection: [created[0].id] })
   }
 }
 
