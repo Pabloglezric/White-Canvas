@@ -10,6 +10,7 @@ import { forgetAssets, isLocalBoard, releaseAssets } from './assets'
 import { thumbnailSvg } from './export'
 import { bus } from './interaction'
 import { finishEditing } from './items/RichText'
+import { adoptForeignFiles } from './ops'
 import { S, adoptRev, applyRemote, fitAll, fitBox, hooks, isPending, replaceItem, resetBoard, toast, useBoard } from './store'
 import type { BoardMeta, BoardSettings, Camera, Item, Peer, Pt, Role } from './types'
 import { normalizeItem, normalizeItems } from './validate'
@@ -300,7 +301,7 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   const flushSoon = debounce(flush, 450)
   // filled in once the live connection is set up further down
   let catchUp: (force?: boolean) => void = () => {}
-  const onOnline = () => { flush(); catchUp(true) }
+  const onOnline = () => { flush(); catchUp(true); void adoptForeignFiles({ quiet: true }) }
   const leave = () => { finishEditing(); flushSoon.flush(); saveOutbox.flush(); set(CACHE, Object.values(S().items)).catch(() => {}) }
   const onHide = () => { if (document.visibilityState === 'hidden') leave(); else { checkAccess(); catchUp() } }
   window.addEventListener('online', onOnline)
@@ -356,6 +357,9 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   }
   if (dirty.size) flush()
   saveCache()
+  // files that items brought in from another board and that have not been copied here yet (a paste made offline,
+  // a copy that failed, a board left before the copy landed)
+  void adoptForeignFiles({ quiet: true })
 
   // ---------- realtime ----------
   const myClient = S().clientId

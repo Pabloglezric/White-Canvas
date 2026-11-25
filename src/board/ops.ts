@@ -1,7 +1,8 @@
 // Higher-level editing operations built on the store's mutate/commit primitives.
 import { uid } from '../lib/util'
+import { adoptAssets, fileRefs, isLocalBoard } from './assets'
 import { aabb, center, connectorGeom, itemBox, ptInBox, unionBoxes } from './geometry'
-import { S, apply, canEdit, commit, mutate, toast, useBoard, viewCenter, type Patch } from './store'
+import { S, apply, canEdit, commit, mutate, patchSilent, toast, useBoard, viewCenter, type BoardState, type Patch } from './store'
 import type { Box, ConnectorItem, FrameItem, Item, Pt } from './types'
 
 export function maxZ(items = S().items): number {
@@ -172,6 +173,78 @@ export function pasteItems(list: Item[] = clipboard, at?: Pt) {
   const target = at || viewCenter()
   const dx = target.x - (box.x + box.w / 2), dy = target.y - (box.y + box.h / 2)
   addItems(cloneItems(list, dx, dy).sort((a, b) => a.z - b.z))
+  // the items are on the board at once; any file they bring from elsewhere follows in the background
+  void adoptForeignFiles()
+}
+
+// What has already been brought into each cloud board this session, or found out of reach: a file moves once,
+// however often it is pasted.
+const adopted = new Map<string, Map<string, string>>()
+let adopting = false
+let adoptAgain = false
+
+/** Points every item on the board, and every undo step, at the board's own copy of a file. */
+function repoint(moved: Map<string, string>) {
+  const own = (src: string) => moved.get(src) ?? src
+  const swap = (it: Item): Item => {
+    if (it.type === 'image') {
+      const src = own(it.src), thumb = it.thumb && own(it.thumb)
+      return src === it.src && thumb === it.thumb ? it : { ...it, src, thumb }
+    }
+    if (it.type === 'ifc' || it.type === 'file') { const src = own(it.src); return src === it.src ? it : { ...it, src } }
+    return it
+  }
+  for (const it of Object.values(S().items)) { const next = swap(it); if (next !== it) patchSilent(it.id, next) }
+  // undo and redo would otherwise bring the old reference back
+  const fix = (p: Patch): Patch => {
+    let out = p
+    for (const id in p) {
+      const v = p[id], next = v && swap(v)
+      if (next && next !== v) { if (out === p) out = { ...p }; out[id] = next }
+    }
+    return out
+  }
+  const steps = (list: BoardState['undo']) => {
+    let changed = false
+    const out = list.map((e) => {
+      const before = fix(e.before), after = fix(e.after)
+      if (before === e.before && after === e.after) return e
+      changed = true
+      return { before, after }
+    })
+    return changed ? out : list
+  }
+  const s = S()
+  const undo = steps(s.undo), redo = steps(s.redo)
+  if (undo !== s.undo || redo !== s.redo) useBoard.setState({ undo, redo })
+}
+
+/**
+ * Gives the open cloud board its own copy of every file its items point at that lives elsewhere (in another board's
+ * folder, or only on this device) and repoints the items when the copies exist. The board must not depend on the
+ * other board surviving, or on its members having access to it. Until a copy lands, and if it fails, the item keeps
+ * its old reference, which still opens for whoever can reach the original; the copy is tried again on the next paste,
+ * when the connection returns and the next time an editor opens the board.
+ */
+export async function adoptForeignFiles(opts: { quiet?: boolean } = {}): Promise<void> {
+  const boardId = S().boardId
+  if (!boardId || isLocalBoard(boardId) || !canEdit() || S().status !== 'ready') return
+  let moved = adopted.get(boardId)
+  if (!moved) adopted.set(boardId, (moved = new Map()))
+  const known = moved
+  const outside = (src: string) => src.startsWith('local:') || (src.startsWith('asset:') && !src.startsWith(`asset:${boardId}/`))
+  const waiting = Object.values(S().items).filter((it) => fileRefs(it).some((src) => outside(src) && !known.has(src)))
+  if (!waiting.length || !navigator.onLine) { repoint(known); return }
+  if (adopting) { adoptAgain = true; return }
+  adopting = true
+  let failed = false
+  try { await adoptAssets(boardId, waiting, known) } catch { failed = true }
+  adopting = false
+  if (S().boardId === boardId) {
+    repoint(known) // whatever did arrive
+    if (failed && !opts.quiet) toast('Some files could not be copied to this board yet — they still point at the original')
+  }
+  if (adoptAgain) { adoptAgain = false; await adoptForeignFiles(opts) }
 }
 
 export function selectAll() {
