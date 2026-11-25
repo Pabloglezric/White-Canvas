@@ -4,7 +4,8 @@ import { uid } from './util'
 import { adoptAssets } from '../board/assets'
 import { deleteLocalBoard, listVersions, loadVersion, localBoards, localItems, saveLocalBoards, saveLocalItems } from '../board/sync'
 import { cloneItems } from '../board/ops'
-import { thumbnailSvg } from '../board/export'
+import { boardPreview } from '../board/export'
+import { normalizeItems } from '../board/validate'
 import type { BoardMeta, Item } from '../board/types'
 
 export interface BoardRow extends BoardMeta { starred?: boolean; last_opened_at?: string | null; local?: boolean; shared?: boolean }
@@ -27,7 +28,7 @@ export async function createBoard(title: string, cloud: boolean, items: Item[] =
   const now = new Date().toISOString()
   if (!cloud) {
     const id = `local-${uid()}`
-    const meta: BoardMeta = { id, title, owner_id: 'local-user', link_access: 'none', settings: {}, created_at: now, updated_at: now, thumbnail: items.length ? thumbnailSvg(Object.fromEntries(items.map((i) => [i.id, i]))) : null }
+    const meta: BoardMeta = { id, title, owner_id: 'local-user', link_access: 'none', settings: {}, created_at: now, updated_at: now, thumbnail: items.length ? await boardPreview(Object.fromEntries(items.map((i) => [i.id, i]))) : null }
     await saveLocalBoards([meta, ...(await localBoards())])
     await saveLocalItems(id, items)
     return id
@@ -45,7 +46,7 @@ async function insertItems(boardId: string, items: Item[]) {
     const res = await supabase.from('board_items').insert(rows.slice(i, i + 200))
     if (res.error) throw new Error(res.error.message)
   }
-  await supabase.from('boards').update({ thumbnail: thumbnailSvg(Object.fromEntries(items.map((i) => [i.id, i]))) }).eq('id', boardId)
+  await supabase.from('boards').update({ thumbnail: await boardPreview(Object.fromEntries(items.map((i) => [i.id, i]))) }).eq('id', boardId)
 }
 
 /**
@@ -84,6 +85,20 @@ async function boardItems(b: BoardRow): Promise<Item[]> {
     if (!data || data.length < 1000) break
   }
   return out
+}
+
+/** Draws a board's dashboard picture afresh from its contents and stores it. Returns it, or null for an empty board. */
+export async function refreshPreview(b: BoardRow): Promise<string | null> {
+  const items = normalizeItems(await boardItems(b))
+  if (!items.length) return null
+  const thumbnail = await boardPreview(Object.fromEntries(items.map((i) => [i.id, i])))
+  if (!thumbnail) return null
+  if (b.local) await saveLocalBoards((await localBoards()).map((x) => (x.id === b.id ? { ...x, thumbnail } : x)))
+  else {
+    const { error } = await supabase.from('boards').update({ thumbnail }).eq('id', b.id)
+    if (error) throw new Error(error.message)
+  }
+  return thumbnail
 }
 
 export async function duplicateBoard(b: BoardRow, cloud: boolean): Promise<string> {

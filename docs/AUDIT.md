@@ -144,3 +144,27 @@ Still open:
 - A cloud board's files pasted or duplicated into a device-only board still read the cloud board's folder: they need the account's access to it and break if it is deleted.
 - A board JSON file holds file references, not the files. Imported by someone who cannot read the original board, its images, models and attachments stay broken.
 - Deleting or moving a device-only board does not free the device storage its files used.
+
+## Follow-up: cursors and board previews (2026-11-25)
+
+Reported: other devices' cursors out of sync on a board open on several devices, and dashboard previews that do not show the board's content. Both were reproduced first, the cursors with two browser windows on one account connected through a stand-in backend.
+
+| Seen | Cause | Fix |
+| --- | --- | --- |
+| A cursor shown in the wrong place after its owner pans or zooms | The position was only sent when the pointer moved. Moving the view under a still pointer changed what it pointed at without telling anyone. | Every packet carries the pointer's position as it is at that moment. |
+| A cursor left behind when the pointer moves off the board, or the app goes to the background | Leaving sent a packet with no position, which changed nothing on the other side. | Packets say when the pointer is off the board. Going to the background says so at once. |
+| No cursor at all from a phone or tablet | Touch input never reported a position. | A finger is shown while it is down, and for a moment after. |
+| Cursors drifting behind the board while you pan or zoom your own view | The glide used between received positions also applied to your own camera movement. | The glide is off whenever it is your view that moved. |
+| Ghost cursors for up to 35 s after a device drops off or reloads | Departed devices were kept for 30 s in case a presence update had been missed. | A device that leaves presence is removed at once; one that goes silent loses its cursor after 15 s. |
+| Your other device's cursor carries your own name | Same account, same label. | It reads "You (other device)". |
+| Previews are plain boxes, with at most the last 260 items | The preview was a schematic, capped, and drew ink and pictures as rectangles. | The preview is a real picture of the whole board, drawn by the image-export renderer: text, shapes, ink, pictures, tables, charts, models. |
+| A preview not updated after a short edit | It was drawn 8 s after the last edit, and leaving sooner cancelled it. | Leaving a board with unpictured edits draws it then. |
+| Old previews stay schematic | Nothing redrew them. | Each is redrawn once, when its board is opened or listed on the dashboard. |
+
+Checked with: 5 two-device end-to-end tests (`tests/e2e/live.spec.ts`), 3 unit tests, and a look at a preview of a board holding a frame, table, kanban cards, a picture, ink and a chart. Not exercised: real devices on the live backend.
+
+Still open:
+
+- Boards with more than 800 items get a simplified preview (cards, tables and charts as outlines).
+- A board changed only through the agent API keeps its old preview until someone opens it.
+

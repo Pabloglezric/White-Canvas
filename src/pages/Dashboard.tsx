@@ -5,17 +5,22 @@ import { useAuth } from '../auth/Auth'
 import { confirmDialog, promptDialog } from '../board/ui/dialogs'
 import { Pop } from '../board/ui/kit'
 import {
-  createBoard, deleteBoard, duplicateBoard, leaveBoard, listCloudBoards, listLocalBoards, moveToAccount, renameBoard, starBoard,
-  trashBoard, type BoardRow,
+  createBoard, deleteBoard, duplicateBoard, leaveBoard, listCloudBoards, listLocalBoards, moveToAccount, refreshPreview,
+  renameBoard, starBoard, trashBoard, type BoardRow,
 } from '../lib/boards'
+import { isOldPreview } from '../board/export'
 import { hasSupabase, supabase } from '../lib/supabase'
 import { debounce, initials, timeAgo } from '../lib/util'
 
 /** Stored previews are shown as an image, never as markup, so nothing inside one can run. */
-function thumbSrc(svg: string | null | undefined): string | null {
-  if (!svg || !svg.startsWith('<svg') || svg.length > 262144) return null
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+function thumbSrc(t: string | null | undefined): string | null {
+  if (!t || t.length > 262144) return null
+  if (/^data:image\/(png|jpeg|webp);base64,/.test(t)) return t
+  return t.startsWith('<svg') ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(t)}` : null
 }
+
+// Boards whose preview has been redrawn (or found empty) since the app started, so each is looked at once.
+const redrawn = new Set<string>()
 
 export function Logo() {
   return (
@@ -68,6 +73,9 @@ export default function Dashboard() {
     const again = () => { if (document.visibilityState === 'visible' && Date.now() - last > 2000) { last = Date.now(); load() } }
     window.addEventListener('focus', again)
     window.addEventListener('online', again)
+    // a device-only board that was just closed has saved its new preview
+    const changed = () => { load() }
+    window.addEventListener('wc-boards-changed', changed)
     document.addEventListener('visibilitychange', again)
     // and hear at once about boards created, renamed, trashed or deleted on another device.
     const soon = debounce(() => { last = Date.now(); load() }, 800)
@@ -81,11 +89,33 @@ export default function Dashboard() {
     return () => {
       window.removeEventListener('focus', again)
       window.removeEventListener('online', again)
+      window.removeEventListener('wc-boards-changed', changed)
       document.removeEventListener('visibilitychange', again)
       soon.cancel()
       if (live) supabase.removeChannel(live)
     }
   }, [loading, me.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Previews saved by older versions were plain boxes. Each such board is redrawn once, one at a time.
+  const latest = useRef(boards)
+  latest.current = boards
+  const redrawing = useRef(false)
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  useEffect(() => {
+    if (!boards || redrawing.current) return
+    redrawing.current = true
+    ;(async () => {
+      for (;;) {
+        const b = (latest.current || []).find((x) => !x.shared && !x.trashed_at && isOldPreview(x.thumbnail) && !redrawn.has(x.id))
+        if (!b || !mounted.current) break
+        redrawn.add(b.id)
+        const thumbnail = await refreshPreview(b).catch(() => null)
+        if (thumbnail && mounted.current) setBoards((list) => list && list.map((x) => (x.id === b.id ? { ...x, thumbnail } : x)))
+      }
+      redrawing.current = false
+    })()
+  }, [boards])
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase()

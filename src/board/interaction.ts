@@ -21,7 +21,10 @@ import {
 import type { Box, ConnEnd, ConnectorItem, DrawItem, Item, Pt, TextItem, Tool } from './types'
 
 export const bus: {
-  cursor?: (p: Pt | null) => void
+  /** Called whenever the pointer moves over the board, or leaves it. */
+  cursor?: () => void
+  /** Where the pointer is on the board right now (world coordinates), or null when it is not over the board. */
+  pointer?: () => Pt | null
   importFiles?: (files: File[], at: Pt) => void
   importText?: (text: string, html: string, at: Pt) => void
 } = {}
@@ -88,6 +91,9 @@ export class Interaction {
   private lockedHit: string | null = null
   private wheel = { dx: 0, dy: 0, zoom: 1, x: 0, y: 0, raf: 0 }
   private gestureZ = 1
+  // Where the pointer is on screen, for the cursor other people see. Null when it is not over the board.
+  private hover: Pt | null = null
+  private hoverTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(private el: HTMLElement) {
     el.addEventListener('pointerdown', this.onDown)
@@ -103,6 +109,8 @@ export class Interaction {
     el.addEventListener('lostpointercapture', this.onLostCapture)
     el.addEventListener('gesturestart', this.onGestureStart as EventListener)
     el.addEventListener('gesturechange', this.onGestureChange as EventListener)
+    // asked for at send time, so the position is right even when the view moved under a pointer that did not
+    bus.pointer = () => (this.hover ? this.world(this.hover) : null)
     window.addEventListener('keydown', this.onKey)
     window.addEventListener('keyup', this.onKeyUp)
     window.addEventListener('paste', this.onPaste)
@@ -130,6 +138,8 @@ export class Interaction {
     window.removeEventListener('paste', this.onPaste)
     window.removeEventListener('blur', this.onBlur)
     clearTimeout(this.longPress)
+    clearTimeout(this.hoverTimer)
+    bus.pointer = undefined
   }
 
   // ---------- helpers ----------
@@ -139,6 +149,19 @@ export class Interaction {
     return { x: e.clientX - r.left, y: e.clientY - r.top }
   }
   private world(p: Pt): Pt { const c = S().camera; return toWorld(c, p.x, p.y) }
+
+  /** Records where the pointer is (or that it has left the board) and lets collaborators know. */
+  private point(p: Pt | null) {
+    clearTimeout(this.hoverTimer)
+    if (!p && !this.hover) return
+    this.hover = p
+    bus.cursor?.()
+  }
+  /** A finger has no hover: its mark stays for a moment after it lifts, then goes. */
+  private touchEnded() {
+    clearTimeout(this.hoverTimer)
+    if (this.hover) this.hoverTimer = setTimeout(() => this.point(null), 1500)
+  }
 
   /** Item under the pointer. Uses the real element under the point (pointer capture retargets events). */
   private hit(e: { clientX: number; clientY: number }): Item | null {
@@ -219,6 +242,7 @@ export class Interaction {
       if (e.cancelable) e.preventDefault()
       if (this.penDown) return // palm contact while the stylus is drawing
       this.touches.set(e.pointerId, p)
+      this.point(this.touches.size === 1 ? p : null) // two fingers are a pinch, not a pointer
     }
     if (e.pointerType === 'pen') this.penDown = true
     if (e.pointerType === 'pen' && !this.penSeen) {
@@ -397,7 +421,8 @@ export class Interaction {
       return
     }
     const w = this.world(p)
-    if (e.pointerType !== 'touch') bus.cursor?.(w)
+    // a mouse or pen hovers; a finger only counts while it is the one finger down
+    if (e.pointerType !== 'touch' || (this.touches.size === 1 && this.touches.has(e.pointerId))) this.point(p)
     if (m.k === 'idle' || e.pointerId !== this.pid) return
     // the button was released somewhere we did not see: finish the gesture now
     if (e.pointerType === 'mouse' && e.buttons === 0) { this.onUp(e); return }
@@ -676,6 +701,7 @@ export class Interaction {
 
   private onUp = (e: PointerEvent) => {
     this.touches.delete(e.pointerId)
+    if (e.pointerType === 'touch') this.touchEnded()
     if (e.pointerType === 'pen') this.penDown = false
     try { this.el.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
     const m = this.mode
@@ -815,12 +841,13 @@ export class Interaction {
 
   private onCancel = (e: PointerEvent) => {
     this.touches.delete(e.pointerId)
+    if (e.pointerType === 'touch') this.touchEnded()
     if (e.pointerType === 'pen') this.penDown = false
     if (this.mode.k === 'pinch') { if (this.touches.size < 2) this.mode = { k: 'idle' }; return }
     if (e.pointerId === this.pid) this.cancelGesture()
   }
 
-  private onLeave = () => { bus.cursor?.(null) }
+  private onLeave = (e: PointerEvent) => { if (e.pointerType !== 'touch') this.point(null) }
   private onBlur = () => {
     this.space = false
     this.penDown = false

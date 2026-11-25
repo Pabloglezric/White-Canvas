@@ -4,6 +4,7 @@ import { resolveAsset } from './assets'
 import { FONT_STACK, inkOn } from './defaults'
 import { aabb, capPath, connectorGeom, itemBox, shapeInset, shapePath, unionBoxes } from './geometry'
 import { inkPath } from './items/ItemView'
+import { paintOverview } from './overview'
 import { S } from './store'
 import type { Box, Item, TextStyle } from './types'
 import { safeColor } from './validate'
@@ -16,7 +17,60 @@ const fillOf = (v: unknown, fallback = '#ffffff') => { const c = safeColor(v, fa
 const LAYER: Record<string, number> = { frame: 0, comment: 2 }
 const sortItems = (list: Item[]) => [...list].sort((a, b) => (LAYER[a.type] ?? 1) - (LAYER[b.type] ?? 1) || a.z - b.z)
 
-/** Small schematic preview stored with the board and shown on the dashboard. */
+const PREVIEW_W = 640, PREVIEW_H = 400
+/** Stored previews must fit the database limit on a board's thumbnail (262,144 characters). */
+const PREVIEW_MAX = 250_000
+/** Above this many items the preview is painted in simplified form; detail would be invisible and slow to draw. */
+const PREVIEW_DETAIL_LIMIT = 800
+
+/**
+ * A miniature of the whole board, stored with it and shown on the dashboard: every item, drawn the way the
+ * image export draws it (text, shapes, ink, pictures, tables, charts), fitted into one small picture.
+ */
+export async function boardPreview(items: Record<string, Item>): Promise<string> {
+  const list = sortItems(Object.values(items).filter((i) => i.type !== 'comment'))
+  const box = unionBoxes(list.map((i) => itemBox(i, items)))
+  if (!box || !list.length) return ''
+  try {
+    if (typeof createImageBitmap === 'undefined') throw new Error('no canvas here')
+    const c = document.createElement('canvas')
+    c.width = PREVIEW_W; c.height = PREVIEW_H
+    const ctx = c.getContext('2d')
+    if (!ctx) throw new Error('no canvas here')
+    // fit everything, with a margin; a board holding one small note is not blown up to fill the picture
+    const k = Math.min((PREVIEW_W - 32) / Math.max(box.w, 1), (PREVIEW_H - 32) / Math.max(box.h, 1), 1.5)
+    const dx = (PREVIEW_W - box.w * k) / 2, dy = (PREVIEW_H - box.h * k) / 2
+    if (list.length > PREVIEW_DETAIL_LIMIT) {
+      paintOverview(c, items, list.map((i) => i.id), { x: dx - box.x * k, y: dy - box.y * k, z: k }, false, 1)
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+    } else {
+      const { svg } = await buildSvg({ box, ids: list.map((i) => i.id) }, { pad: 0, background: null, items, imageSide: 320, width: Math.max(1, Math.round(box.w * k)) })
+      const img = new Image()
+      const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
+      try {
+        await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('preview failed')); img.src = url })
+        ctx.drawImage(img, dx, dy, box.w * k, box.h * k)
+      } finally { URL.revokeObjectURL(url) }
+    }
+    // the board colour goes underneath, so the picture has no transparency and compresses well
+    ctx.globalCompositeOperation = 'destination-over'
+    ctx.fillStyle = '#f6f5f1'
+    ctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H)
+    for (const q of [0.82, 0.6, 0.4]) {
+      let out = c.toDataURL('image/webp', q)
+      if (!out.startsWith('data:image/webp')) out = c.toDataURL('image/jpeg', q) // browsers that cannot write WebP
+      if (out.length <= PREVIEW_MAX) return out
+    }
+    throw new Error('preview too large')
+  } catch {
+    return thumbnailSvg(items)
+  }
+}
+
+/** Is this a stored preview from before previews were real miniatures (or none at all)? */
+export const isOldPreview = (t: string | null | undefined) => !t || t.startsWith('<svg')
+
+/** Schematic stand-in (plain boxes), used only where the board cannot be drawn, such as a browser without canvas. */
 export function thumbnailSvg(items: Record<string, Item>): string {
   const list = sortItems(Object.values(items).filter((i) => i.type !== 'comment'))
   const box = unionBoxes(list.map((i) => itemBox(i, items)))
@@ -25,7 +79,8 @@ export function thumbnailSvg(items: Record<string, Item>): string {
   const vb = `${Math.round(box.x - pad)} ${Math.round(box.y - pad)} ${Math.round(box.w + pad * 2)} ${Math.round(box.h + pad * 2)}`
   const sw = Math.max(box.w, box.h) / 220
   let out = ''
-  for (const it of list.slice(-260)) {
+  for (const it of list) {
+    if (out.length > PREVIEW_MAX - 2000) break
     const r = (n: number) => Math.round(n)
     if (it.type === 'connector') {
       const g = connectorGeom(it, items)
@@ -90,18 +145,34 @@ async function toDataUrl(src: string, maxSide = 2200): Promise<string> {
   try {
     const url = await resolveAsset(src)
     if (!url) return ''
-    if (url.startsWith('data:')) return url
+    const small = maxSide <= 512
+    if (url.startsWith('data:') && !small) return url
     const blob = await (await fetch(url)).blob()
     const bmp = await createImageBitmap(blob)
     const k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height))
     const c = document.createElement('canvas')
-    c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k)
+    c.width = Math.max(1, Math.round(bmp.width * k)); c.height = Math.max(1, Math.round(bmp.height * k))
     c.getContext('2d')!.drawImage(bmp, 0, 0, c.width, c.height)
+    bmp.close()
+    if (small) return c.toDataURL('image/webp', 0.8) // keeps transparency; falls back to PNG where WebP cannot be written
     return c.toDataURL(blob.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.9)
   } catch { return '' }
 }
 
-async function itemSvg(it: Item, items: Record<string, Item>): Promise<string> {
+// Small copies of board pictures, kept so a preview that is redrawn after every edit does not download them again.
+const smallImages = new Map<string, Promise<string>>()
+function smallImage(it: { src: string; thumb?: string }, side: number): Promise<string> {
+  let hit = smallImages.get(it.src)
+  if (!hit) {
+    hit = (async () => (it.thumb && (await toDataUrl(it.thumb, side))) || toDataUrl(it.src, side))()
+    smallImages.set(it.src, hit)
+    hit.then((v) => { if (!v) smallImages.delete(it.src) }) // a failed download is tried again next time
+    if (smallImages.size > 300) smallImages.delete(smallImages.keys().next().value!)
+  }
+  return hit
+}
+
+async function itemSvg(it: Item, items: Record<string, Item>, imageSide?: number): Promise<string> {
   if (it.type === 'comment') return ''
   if (it.type === 'connector') {
     const g = connectorGeom(it, items)
@@ -142,7 +213,7 @@ async function itemSvg(it: Item, items: Record<string, Item>): Promise<string> {
       body = `<path d="${inkPath(it)}" fill="${col(it.stroke)}"${it.tool === 'highlighter' ? ' opacity="0.45"' : ''}/>`
       break
     case 'image': case 'ifc': {
-      const href = it.type === 'image' ? await toDataUrl(it.src) : it.preview || ''
+      const href = it.type === 'image' ? await (imageSide ? smallImage(it, imageSide) : toDataUrl(it.src)) : it.preview || ''
       body = href
         ? `<image href="${escapeAttr(href)}" width="${n(it.w)}" height="${n(it.h)}" preserveAspectRatio="none"/>`
         : `<rect width="${n(it.w)}" height="${n(it.h)}" rx="8" fill="#eef0f3" stroke="#d9d7d0"/><text x="${n(it.w / 2)}" y="${n(it.h / 2)}" text-anchor="middle" font-family='${FONT_STACK.sans}' font-size="13" fill="#7a7d86">${escapeHtml(it.type === 'ifc' ? it.name : 'Image')}</text>`
@@ -224,17 +295,19 @@ export function exportArea(scope: 'selection' | 'all' | string = 'all'): ExportA
   return { box, ids: list.map((i) => i.id) }
 }
 
-export async function buildSvg(area: ExportArea, opts: { pad?: number; background?: string | null } = {}): Promise<{ svg: string; w: number; h: number }> {
-  const { items } = S()
+export async function buildSvg(area: ExportArea, opts: { pad?: number; background?: string | null; items?: Record<string, Item>; imageSide?: number; width?: number } = {}): Promise<{ svg: string; w: number; h: number }> {
+  // previews pass their own items (the board need not be open), a small picture size and the output width
+  const items = opts.items || S().items
   const pad = opts.pad ?? 32
   const b = { x: area.box.x - pad, y: area.box.y - pad, w: area.box.w + pad * 2, h: area.box.h + pad * 2 }
   const list = sortItems(area.ids.map((id) => items[id]).filter(Boolean))
   // images are fetched and encoded a few at a time so a photo-heavy board does not exhaust memory
   const parts: string[] = new Array(list.length)
   let next = 0
-  await Promise.all(Array.from({ length: 4 }, async () => { while (next < list.length) { const i = next++; parts[i] = await itemSvg(list[i], items).catch(() => '') } }))
+  await Promise.all(Array.from({ length: 4 }, async () => { while (next < list.length) { const i = next++; parts[i] = await itemSvg(list[i], items, opts.imageSide).catch(() => '') } }))
   const bg = opts.background === null ? '' : `<rect x="${n(b.x)}" y="${n(b.y)}" width="${n(b.w)}" height="${n(b.h)}" fill="${fillOf(opts.background, '#f6f5f1')}"/>`
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(b.w)}" height="${Math.round(b.h)}" viewBox="${n(b.x)} ${n(b.y)} ${n(b.w)} ${n(b.h)}">${bg}${parts.join('')}</svg>`
+  const outW = opts.width || Math.round(b.w), outH = opts.width ? Math.max(1, Math.round((opts.width * b.h) / Math.max(b.w, 1))) : Math.round(b.h)
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${outW}" height="${outH}" viewBox="${n(b.x)} ${n(b.y)} ${n(b.w)} ${n(b.h)}">${bg}${parts.join('')}</svg>`
   return { svg, w: b.w, h: b.h }
 }
 

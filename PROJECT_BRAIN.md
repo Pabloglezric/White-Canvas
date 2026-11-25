@@ -31,6 +31,13 @@ Last updated: 2026-11-25
 - Device-only boards never upload on their own. A signed-in dashboard offers to move them into the account
   (`moveToAccount` in `src/lib/boards.ts`); nothing moves without that click, because a device can be shared.
 - Presence is per device (client id); anything shown per person goes through `people()` in `src/board/store.ts`.
+- Cursors: every cursor packet states where the pointer is now (`bus.pointer()`, asked for at send time) or that it is
+  off the board (`off`). Never send "no news" for a pointer: a missed packet would strand a cursor on other screens.
+  A finger counts as a pointer only while it is down. A device that leaves presence is dropped at once.
+- Board previews are real pictures (`boardPreview` in `src/board/export.ts`: the image-export renderer, 640×400 WebP,
+  under the 262,144-character database limit). Plain-box SVGs are only the no-canvas fallback; `isOldPreview` marks
+  those for redrawing (on opening the board, and from the dashboard). A preview is drawn when leaving a board with
+  unpictured edits, not only on the timer.
 - An open cloud board catches up from the server (`catchUp` in `src/board/sync.ts`: rows changed since the newest one
   seen, deleted included) on going live, reconnect, coming back into view and coming back online.
 - A frame's preset is a field (`preset`), shown as a tag only while the proportions match (`framePreset`). Titles never carry it.
@@ -61,8 +68,11 @@ built on top of the sync fixes.
 
 ## Tests
 
-- `npm run test:unit` — 72 tests (geometry, store, validation, sync).
-- `npm run test:e2e` — 21 tests on the production build, device-only boards, desktop and two Fold touch sizes.
+- `npm run test:unit` — 75 tests (geometry, store, validation, sync, previews).
+- `npm run test:e2e` — 31 tests on the production build: device-only boards on desktop and two Fold touch sizes, app
+  updates, and "live" tests with two signed-in devices on one board. The live tests run against a second build
+  (`dist-live`) pointed at a stand-in backend, `tests/e2e/backend.ts` (REST answers plus a realtime hub with presence
+  and broadcast). Use it for anything that only shows with an account or a second device.
 - CI: `.github/workflows/ci.yml` runs type-check, unit tests, build and end-to-end tests on every push.
 - Profiling handle: set `localStorage["wc.debug"] = "1"` to expose `window.__wc`.
 
