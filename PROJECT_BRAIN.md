@@ -59,6 +59,16 @@ Duplicated cloud boards get their own files (`adoptAssets` in `src/lib/boards.ts
 anything that puts items into a cloud board from elsewhere should go through `adoptAssets`. Branch `claude/loving-bohr-s5ikwd`,
 built on top of the sync fixes.
 
+## Bluebeam research (2026-11-25)
+
+Research only, nothing built. Report: `reports/Bluebeam capabilities for White Canvas.md`; sourced notes in
+`research_notes/Bluebeam capabilities for White Canvas/`.
+
+- Direction recommended: build drawing review natively, exchange data with Bluebeam through standard PDF annotations.
+- Three foundations gate the rest: a retained vector PDF sheet, per-sheet scale with point-list geometry, cross-type item metadata.
+- Open decision for the owner: the Bluebeam Developer Terms restrict building similar features, so API sign-up is not a default.
+- Untested: whether Revu honours a `/Measure` dictionary written by another tool. Needs a hands-on test in a licensed copy.
+
 ## Tests
 
 - `npm run test:unit` — 72 tests (geometry, store, validation, sync).
