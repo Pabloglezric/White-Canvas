@@ -49,8 +49,9 @@ grid(dec, [
   { title: 'Who is the first user?', desc: 'Sets the order after the foundations.\nA: design reviewer on a Mac: review sessions first.\nB: site manager on a phone: snag lists first.\nC: estimator: measurement and counts first.', status: 'Needs you', who: 'You', due: '2026-11-28', tags: ['roadmap'], fill: C.decision },
   { title: 'Inception window: pictures first?', desc: 'You decided: screenshots are fine. Claude refreshes them in frame 7 after each change and you comment on them. A live window stays as an idea in frame 5.', status: 'Decided', who: 'You', due: '2026-11-25', tags: ['method'], fill: C.done },
   { title: 'Graphify always on?', desc: 'You decided: yes. Claude rebuilds the code map at the start of each session and after each merge, and redraws frame 8. Nothing is stored in the repository.', status: 'Decided: yes', who: 'You', due: '2026-11-25', tags: ['method'], fill: C.done },
-  { title: 'Merge the research pull request', desc: 'Done on 25 Nov: pull request 7 is merged, so pull requests 1 to 7 are all in production.', status: 'Done', who: 'You', due: '2026-11-25', tags: ['housekeeping'], fill: C.done },
+  { title: 'Merge the research pull request', desc: 'Done on 25 Nov. Pull request 7 is merged and its production deploy is live, so pull requests 1 to 7 are all in production. That deploy also brought the fix that lets cards show their whole text.', status: 'Done', who: 'You', due: '2026-11-25', tags: ['housekeeping'], fill: C.done },
   { title: 'Paid database plan', desc: 'The free plan pauses when idle and keeps no point-in-time backups. Needed before review sessions are offered as a record. Not urgent.', status: 'Later', who: 'You', tags: ['cost', 'before phase 4'], fill: C.decision },
+  { title: 'Merge stage 1, part 1 (pull request 8)', desc: 'Layers, status, subject and custom fields on every item. 94 unit tests and 32 end-to-end tests pass.\nMerging puts it in production. After that Claude updates the board server so it can use the new details too.\nSay "merge D9" and Claude does both.', status: 'Needs you', who: 'You', due: '2026-11-27', tags: ['stage 1'], fill: C.decision },
 ].map((c, i) => ({ ...c, title: `D${i + 1} · ${c.title}` })), card, { cols: 3, cw: 430, rh: 270 })
 items.filter((i) => i.parent === dec.id && i.type === 'card').forEach((c) => { c.h = 250 })
 
@@ -83,7 +84,7 @@ const phases = [
     ['One markup item for all shapes', 'Design: a single point-based item for clouds, lines, areas, counts and dimensions.', '1–2 days'],
   ]],
   ['Phase 1 · Foundations', 'Everything else stands on these', [
-    ['Layers, status and custom fields', 'Every item can carry a layer, a status, a subject and your own fields.\nBeats Bluebeam: works on every device, not only on Windows.', '2–5 days'],
+    ['Layers, status and custom fields', 'First part built on 25 Nov, waiting in pull request 8 (see D9).\nBuilt: any item can carry a layer, a status, a subject and your own fields. A tag button on the selection sets them. A Layers panel in the menu manages the lists. The eye hides a layer for you only.\nNot built yet: locking a layer, a record of who changed a status, layers carried across a paste between two boards.\nBeats Bluebeam: works on every device, not only on Windows.', '2–5 days', 'In review'],
     ['Vector PDF sheets', 'Keep the original PDF; draw it sharp at any zoom; select and search its text.\nToday pages become blurry pictures and the file is thrown away.', '1–3 weeks'],
   ]],
   ['Phase 2 · Measure and mark', 'The core drawing-review tools', [
@@ -111,7 +112,7 @@ const cw = 565
 phases.forEach(([name, sub, list], pi) => {
   const x = 25 + pi * cw
   const head = shape(tools, `**${name}**\n${sub}`, x, 65, cw - 25, 90, pi === 0 ? '#f1f0ec' : '#b9c8ff')
-  list.forEach(([title, desc, est], i) => card(tools, { title, desc, est, status: 'Not started', tags: [name.split(' · ')[0]], fill: pi === 0 ? C.method : C.tool }, x, 180 + i * 255, cw - 25, 235))
+  list.forEach(([title, desc, est, status = 'Not started'], i) => card(tools, { title, desc, est, status, tags: [name.split(' · ')[0]], fill: pi === 0 ? C.method : C.tool }, x, 180 + i * 255, cw - 25, 235))
   if (pi) link(items.find((i) => i.html?.includes(phases[pi - 1][0])), head, { route: 'straight' })
 })
 text(tools, 'Estimates are for one developer and come from reading the code, not from a prototype. Total at base scope: roughly 10–29 working weeks.', 25, 1290, 2000, 18)
