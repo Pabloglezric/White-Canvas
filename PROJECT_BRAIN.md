@@ -47,7 +47,8 @@ Full pre-launch audit and fix pass: see `docs/AUDIT.md` for findings, measuremen
 
 Missing boards across devices, doubled initials, IFC scroll zoom and stale ratio tags: causes, fixes and what is still
 open are in `docs/AUDIT.md` (last section). Migration `0004_catch_up_index.sql` is applied to the live database.
-The fixes are on branch `claude/laughing-albattani-kmvv1g`; production updates when that is merged into the production branch.
+Merged into the production branch on 2026-11-25 (pull requests 1, 3 and 5, with 2 for app updates). Pull request 4, merged
+earlier the same day, covered a subset (one avatar per person, list refresh on focus); the fuller versions replaced it.
 
 Duplicated cloud boards get their own files (`adoptAssets` in `src/lib/boards.ts`, `copyAsset` in `src/board/assets.ts`):
 anything that puts items into a cloud board from elsewhere should go through `adoptAssets`. Branch `claude/loving-bohr-s5ikwd`,
