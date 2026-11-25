@@ -16,6 +16,11 @@ Last updated: 2026-11-24
 - Realtime: broadcast channel `ops:<board>` for peer edits, `board:<board>` for presence and cursors (private channels,
   RLS on `realtime.messages`), Postgres changes for writes made by the agent server.
 - Offline: IndexedDB cache and outbox per board; device-only boards (`local-…`) need no account.
+- Updates: every build stamps a unique id into `index.html` (`meta[name=wc-build]`) and into the service worker
+  (`buildStamp` in `vite.config.ts`). The changed worker file is the only way an installed app notices a deploy, so it must
+  never be identical between builds. An open app is offered the new build and reloads by itself once it is in the
+  background (`src/main.tsx`); tests in `tests/e2e/update.spec.ts`. Only the production branch reaches installed apps;
+  every other branch gets a preview URL.
 - Assets in private bucket `board-assets/<board_id>/…`, signed URLs.
 - Share links require sign-in; opening one calls `join_board` and adds a membership (no anonymous enumeration).
 - Agent access through hashed personal tokens (`api_tokens`), edge function uses the service role.

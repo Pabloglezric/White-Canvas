@@ -1,48 +1,35 @@
 // White Canvas service worker: keeps the app usable offline and updates cleanly.
-// The cache name changes with every build (see precache.json), so old files never pile up.
+// The build fills in BUILD (see vite.config.ts), so this file differs on every deploy. That difference is the
+// only thing that tells an installed app a new version exists. The cache name follows it, so old files never pile up.
+const BUILD = { version: 'dev', files: [] } // @wc-build
 const PREFIX = 'wc-shell-'
-let cacheName = PREFIX + 'boot'
-
-async function manifest() {
-  try {
-    const res = await fetch('/precache.json', { cache: 'no-store' })
-    if (res.ok) return await res.json()
-  } catch { /* offline install: keep going with what we have */ }
-  return { version: 'boot', files: [] }
-}
+const CACHE = PREFIX + BUILD.version
 
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
-    const m = await manifest()
-    cacheName = PREFIX + m.version
-    const cache = await caches.open(cacheName)
+    const cache = await caches.open(CACHE)
     await cache.addAll(['/', '/manifest.webmanifest', '/icons/icon.svg'])
     // App code needed to open a board offline. Heavy optional parts (PDF, 3D) are cached on first use.
-    await Promise.all(m.files.map((f) => cache.add(f).catch(() => {})))
+    await Promise.all(BUILD.files.map((f) => cache.add(f).catch(() => {})))
     await self.skipWaiting()
   })())
 })
 
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
-    const m = await manifest()
-    if (m.version !== 'boot') cacheName = PREFIX + m.version
     const keys = await caches.keys()
-    await Promise.all(keys.filter((k) => k.startsWith(PREFIX) && k !== cacheName).map((k) => caches.delete(k)))
+    await Promise.all(keys.filter((k) => k.startsWith(PREFIX) && k !== CACHE).map((k) => caches.delete(k)))
     await self.clients.claim()
   })())
 })
 
-self.addEventListener('message', (e) => { if (e.data === 'skipWaiting') self.skipWaiting() })
+self.addEventListener('message', (e) => {
+  if (e.data === 'skipWaiting') self.skipWaiting()
+  // an open page asks which build now serves it, to tell whether it is behind
+  if (e.data === 'wc-build?' && e.source) e.source.postMessage({ type: 'wc-build', version: BUILD.version })
+})
 
-async function openCache() {
-  // after a worker restart the in-memory name is lost; reuse the newest shell cache
-  if (cacheName === PREFIX + 'boot') {
-    const keys = (await caches.keys()).filter((k) => k.startsWith(PREFIX))
-    if (keys.length) cacheName = keys[keys.length - 1]
-  }
-  return caches.open(cacheName)
-}
+const openCache = () => caches.open(CACHE)
 
 self.addEventListener('fetch', (e) => {
   const req = e.request
