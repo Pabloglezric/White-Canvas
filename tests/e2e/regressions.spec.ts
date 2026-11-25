@@ -1,4 +1,5 @@
 // One test per defect found in the pre-launch audit, so none of them can come back unnoticed.
+import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 import { drag, esc2, newBoard, snap, watchErrors } from './helpers'
 
@@ -191,4 +192,42 @@ test('controls have accessible names and dialogs trap focus', async ({ page }) =
   expect(await dialog.evaluate((el) => el.contains(document.activeElement))).toBe(true)
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
+})
+
+test('a preset frame drops its ratio tag once it is resized out of proportion', async ({ page }) => {
+  await newBoard(page)
+  await page.getByRole('button', { name: 'Frame (F)' }).click()
+  await page.getByRole('button', { name: /^Square/ }).click()
+  const tag = page.locator('.wc-frame-tag')
+  await expect(tag).toHaveText('Square')
+  expect((Object.values((await snap(page)).items)[0] as any).title).toBe('Frame 1')
+  const h = (await page.locator('[data-handle="e"]').boundingBox())!
+  await drag(page, [h.x + h.width / 2, h.y + h.height / 2], [h.x - 200, h.y + h.height / 2])
+  const f = Object.values((await snap(page)).items)[0] as any
+  expect(Math.round(f.w)).toBeLessThan(900)
+  await expect(tag).toHaveCount(0)
+  // back in proportion (undo), the tag is back too: it always describes the frame as it is now
+  await page.keyboard.press('Control+z')
+  await expect(tag).toHaveText('Square')
+})
+
+test('scrolling over an open 3D model zooms the model, not the board', async ({ page }) => {
+  await newBoard(page)
+  test.skip(!(await page.evaluate(() => !!document.createElement('canvas').getContext('webgl2'))), 'WebGL is not available in this browser')
+  await page.evaluate(() => (window as any).__wc.useBoard.setState({ panel: 'insert' }))
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), page.getByText('3D model (IFC)').click()])
+  await chooser.setFiles(fileURLToPath(new URL('./fixtures/box.ifc', import.meta.url)))
+  // a model added on its own opens without a further click
+  const view = page.locator('.wc-ifc canvas')
+  await expect(view).toBeVisible({ timeout: 30_000 })
+  await expect(page.locator('.wc-ifc [role=status]')).toHaveCount(0, { timeout: 30_000 })
+  await page.waitForTimeout(300)
+  const box = (await view.boundingBox())!
+  const before = await view.screenshot()
+  const camera = (await snap(page)).camera
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, -100); await page.waitForTimeout(50) }
+  await expect.poll(async () => (await view.screenshot()).equals(before)).toBe(false)
+  expect((await snap(page)).camera).toEqual(camera)
+  expect(await view.boundingBox()).toEqual(box)
 })

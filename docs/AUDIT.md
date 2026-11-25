@@ -115,3 +115,32 @@ Open: board items are reachable by keyboard but are not announced to screen read
 4. The Supabase free plan pauses a project after a week without activity and has no point-in-time recovery. Move to a paid plan before relying on it.
 5. Privacy policy and terms, if anyone outside your team will sign up.
 6. A custom domain, and `main` as the production branch.
+
+## Follow-up: sync between devices (2026-11-25)
+
+Four reports from use on two installed devices with one account. Each was reproduced or traced to its cause before it was changed.
+
+| Report | Cause | Fix |
+| --- | --- | --- |
+| Not all boards appear on both devices | The account held one cloud board; the others were device-only boards (made before signing in), which never upload. The board list was also only read once, when the dashboard opened. | The dashboard says which boards live on this device only and moves them into the account in one click, files and saved versions included. The list refreshes when the app comes back into view or online, and when a board is created, renamed, trashed or deleted on another device. |
+| The user's initials show twice | Presence is tracked per device, and the top bar drew one avatar per device. | One avatar per account; your own other devices are not listed. |
+| Scrolling does not zoom an IFC model | The board's wheel handler ran before the viewer could stop the event, so the board zoomed (1× to 2.6× in six wheel notches) with the model inside it. | The viewer takes the wheel on the way down. Scrolling zooms toward the point under the pointer and can pass through walls. A model uploaded on its own opens straight away. |
+| Resized preset sheets keep their ratio tag | The preset was written into the frame title ("16:9 2") and never revisited. | The preset is a separate tag that shows only while the frame has those proportions. Titles written by older versions are converted when read. |
+
+Related gaps closed in the same pass:
+
+- An open board now asks the server what changed (deletions included) when it goes live, comes back into view, comes back online or reconnects. Before, changes made while a device slept were missed until the board was reopened.
+- A board opened offline from its saved copy now picks up its real title, role and content when the connection returns.
+- "Copy to cloud" left device-only files (images, PDFs, models) behind, so they were broken on other devices. It is replaced by "Move to my account", which uploads them.
+
+Checked with: 6 new unit tests, 2 new end-to-end tests (ratio tag, model zoom), and a signed-in run against a mocked backend for the dashboard move and the catch-up. Not exercised against the live backend: two real devices on one account, and live presence.
+
+Closed since: a duplicated cloud board (your own, or "Make my own copy" of a shared one) now gets its own copy of every image, PDF page, model and attachment, copied on the server into the new board's folder. Before, the copy read the original's files, so it broke when the original was deleted or sharing was turned off. If a file cannot be copied, the half-made copy is removed. The storage rules already allowed this (read on the original, write on your own board), checked against the live project's policies; 4 unit tests. Not exercised against the live backend.
+
+Closed since: items pasted from another board, or imported from a board JSON file, into a cloud board now get their own copy of every image, PDF page, model and attachment. The items appear at once; the files are copied in the background (on the server for cloud files, uploaded for device files) and the items, and their undo steps, are repointed when the copies land. Before, they kept reading the other board's folder, so they broke when that board was deleted and never loaded for members without access to it. A copy that fails keeps the old reference and is tried again on the next paste, on reconnect and the next time an editor opens the board; opening a board also repairs items pasted before this fix, if the person opening it can still read the original. Pasting within one board copies nothing. 6 unit tests. Not exercised against the live backend.
+
+Still open:
+
+- A cloud board's files pasted or duplicated into a device-only board still read the cloud board's folder: they need the account's access to it and break if it is deleted.
+- A board JSON file holds file references, not the files. Imported by someone who cannot read the original board, its images, models and attachments stay broken.
+- Deleting or moving a device-only board does not free the device storage its files used.

@@ -36,6 +36,13 @@ export const FRAME_PRESETS: { label: string; w: number; h: number }[] = [
   { label: 'Square', w: 1000, h: 1000 },
 ]
 
+/** The preset a frame still has the proportions of; undefined once it has been resized out of them. */
+export function framePreset(f: { preset?: string; w: number; h: number }): string | undefined {
+  const p = f.preset ? FRAME_PRESETS.find((x) => x.w && x.label === f.preset) : undefined
+  if (!p || !(f.w > 0) || !(f.h > 0)) return undefined
+  return Math.abs((f.w / f.h) / (p.w / p.h) - 1) < 0.005 ? p.label : undefined
+}
+
 type Init<T> = Partial<T> & { x: number; y: number }
 const base = (type: Item['type'], x: number, y: number, w: number, h: number) =>
   ({ id: uid(), type, x, y, w, h, rot: 0, z: 0, rev: 0 }) as const

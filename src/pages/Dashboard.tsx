@@ -1,15 +1,15 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Copy, HardDrive, LogIn, MoreHorizontal, Pencil, Plus, RotateCcw, Search, Settings as Cog, Star, Trash2, Users } from 'lucide-react'
 import { useAuth } from '../auth/Auth'
 import { confirmDialog, promptDialog } from '../board/ui/dialogs'
 import { Pop } from '../board/ui/kit'
 import {
-  createBoard, deleteBoard, duplicateBoard, leaveBoard, listCloudBoards, listLocalBoards, renameBoard, starBoard, trashBoard,
-  type BoardRow,
+  createBoard, deleteBoard, duplicateBoard, leaveBoard, listCloudBoards, listLocalBoards, moveToAccount, renameBoard, starBoard,
+  trashBoard, type BoardRow,
 } from '../lib/boards'
-import { hasSupabase } from '../lib/supabase'
-import { initials, timeAgo } from '../lib/util'
+import { hasSupabase, supabase } from '../lib/supabase'
+import { debounce, initials, timeAgo } from '../lib/util'
 
 /** Stored previews are shown as an image, never as markup, so nothing inside one can run. */
 function thumbSrc(svg: string | null | undefined): string | null {
@@ -36,30 +36,55 @@ export default function Dashboard() {
   const [q, setQ] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+  const [moving, setMoving] = useState<{ done: number; total: number } | null>(null)
+  const runs = useRef(0)
+  const listFailed = useRef(false)
 
   const load = async () => {
+    const run = ++runs.current
     try {
       const local = await listLocalBoards()
       let cloud: BoardRow[] = []
       if (me.signedIn) {
-        try { cloud = await listCloudBoards(me.id); localStorage.setItem('wc.boards.cache', JSON.stringify(cloud.map((b) => ({ ...b, thumbnail: null })))) }
-        catch (e) {
+        try {
+          cloud = await listCloudBoards(me.id)
+          localStorage.setItem('wc.boards.cache', JSON.stringify(cloud.map((b) => ({ ...b, thumbnail: null }))))
+          if (listFailed.current) { listFailed.current = false; setErr('') }
+        } catch (e) {
           // offline: show the last list we saw so boards cached on this device stay reachable
           try { cloud = JSON.parse(localStorage.getItem('wc.boards.cache') || '[]') } catch { /* ignore */ }
+          listFailed.current = true
           setErr(navigator.onLine ? (e as Error).message : 'You are offline — boards you have opened before still work.')
         }
       }
-      setBoards([...cloud, ...local])
+      if (run === runs.current) setBoards([...cloud, ...local]) // a slower, older request never overwrites a newer list
     } catch (e) { setErr((e as Error).message); setBoards([]) }
   }
-  useEffect(() => { if (!loading) load() }, [loading, me.id]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Boards created on another device or tab appear when this tab comes back into view.
   useEffect(() => {
     if (loading) return
-    const onShow = () => { if (document.visibilityState === 'visible') load() }
-    document.addEventListener('visibilitychange', onShow)
-    window.addEventListener('focus', onShow)
-    return () => { document.removeEventListener('visibilitychange', onShow); window.removeEventListener('focus', onShow) }
+    load()
+    // An installed app can stay open for days: look again whenever it comes back into view or back online,
+    let last = Date.now()
+    const again = () => { if (document.visibilityState === 'visible' && Date.now() - last > 2000) { last = Date.now(); load() } }
+    window.addEventListener('focus', again)
+    window.addEventListener('online', again)
+    document.addEventListener('visibilitychange', again)
+    // and hear at once about boards created, renamed, trashed or deleted on another device.
+    const soon = debounce(() => { last = Date.now(); load() }, 800)
+    const live = me.signedIn && hasSupabase
+      ? supabase.channel(`boards:${me.id}`).on('postgres_changes', { event: '*', schema: 'public', table: 'boards' }, (p) => {
+          const row = p.new as Partial<BoardRow> | null
+          if (p.eventType !== 'UPDATE' || !row?.id) { soon(); return }
+          setBoards((list) => list && list.map((b) => (b.id === row.id ? { ...b, title: row.title ?? b.title, trashed_at: row.trashed_at ?? null, updated_at: row.updated_at ?? b.updated_at, thumbnail: row.thumbnail ?? b.thumbnail } : b)))
+        }).subscribe()
+      : null
+    return () => {
+      window.removeEventListener('focus', again)
+      window.removeEventListener('online', again)
+      document.removeEventListener('visibilitychange', again)
+      soon.cancel()
+      if (live) supabase.removeChannel(live)
+    }
   }, [loading, me.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const shown = useMemo(() => {
@@ -81,6 +106,19 @@ export default function Dashboard() {
     setBusy(false)
   }
   const act = (fn: () => Promise<unknown>) => async () => { try { await fn(); await load() } catch (e) { setErr((e as Error).message) } }
+  // Boards made before signing in (or made device-only) live on this device alone until they are moved.
+  const deviceOnly = me.signedIn ? (boards || []).filter((b) => b.local && !b.trashed_at) : []
+  const moveAll = async () => {
+    const list = deviceOnly
+    const failed: string[] = []
+    for (let i = 0; i < list.length; i++) {
+      setMoving({ done: i, total: list.length })
+      try { await moveToAccount(list[i]) } catch (e) { failed.push(`"${list[i].title}" (${navigator.onLine ? (e as Error).message : 'you are offline'})`) }
+    }
+    setMoving(null)
+    setErr(failed.length ? `Could not move ${failed.join(', ')}. ${failed.length === 1 ? 'It is' : 'They are'} still safe on this device.` : '')
+    await load()
+  }
   const tabs: [Tab, string][] = [['all', 'All boards'], ['starred', 'Starred'], ['shared', 'Shared with me'], ['device', 'This device'], ['trash', 'Trash']]
 
   return (
@@ -135,6 +173,18 @@ export default function Dashboard() {
           </p>
         )}
 
+        {deviceOnly.length > 0 && (
+          <div className="mb-4 wc-surface wc-row flex-wrap" role="status" style={{ padding: '10px 14px', boxShadow: 'none', gap: 10 }}>
+            <HardDrive size={16} style={{ flex: 'none' }} />
+            <span className="flex-1" style={{ minWidth: 200 }}>
+              {moving
+                ? `Moving board ${moving.done + 1} of ${moving.total} to your account…`
+                : `${deviceOnly.length === 1 ? '1 board is' : `${deviceOnly.length} boards are`} saved on this device only, so ${deviceOnly.length === 1 ? 'it does' : 'they do'} not appear on your other devices.`}
+            </span>
+            <button className="wc-btn is-accent" disabled={!!moving} onClick={moveAll}>Move {deviceOnly.length === 1 ? 'it' : 'them'} to my account</button>
+          </div>
+        )}
+
         {boards === null ? <div className="wc-spin" /> : shown.length === 0 ? (
           <div className="wc-surface" style={{ padding: 36, textAlign: 'center', boxShadow: 'none' }}>
             <p className="text-lg font-medium mb-1">{tab === 'all' && !q ? 'Start with a blank board' : 'Nothing here'}</p>
@@ -177,7 +227,7 @@ export default function Dashboard() {
                             <>
                               <button onClick={async () => { const t = await promptDialog({ title: 'Rename board', label: 'Board name', value: b.title, confirmLabel: 'Rename' }); if (t) act(() => renameBoard(b, t))() }}><Pencil size={15} /> Rename</button>
                               <button onClick={act(() => duplicateBoard(b, !b.local))}><Copy size={15} /> Duplicate</button>
-                              {b.local && me.signedIn && <button onClick={act(async () => nav(`/board/${await duplicateBoard(b, true)}`))}><Users size={15} /> Copy to cloud</button>}
+                              {b.local && me.signedIn && !moving && <button onClick={act(() => moveToAccount(b))}><Users size={15} /> Move to my account</button>}
                               <button onClick={act(() => trashBoard(b, true))}><Trash2 size={15} /> Move to trash</button>
                             </>
                           )}

@@ -3,12 +3,14 @@
 // Everything is coerced to a known-good shape (or dropped), so one malformed or hostile row can never
 // crash rendering, inject markup, or load an unsafe URL.
 import DOMPurify from 'dompurify'
+import { FRAME_PRESETS } from './defaults'
 import type { Item } from './types'
 
 const SHAPES = new Set(['rect', 'round', 'ellipse', 'diamond', 'triangle', 'parallelogram', 'hexagon', 'star', 'pill', 'cylinder', 'cloud', 'callout', 'arrowRight', 'arrowLeft', 'pentagon', 'octagon', 'trapezoid', 'cross', 'document', 'predefined'])
 const TYPES = new Set(['sticky', 'text', 'shape', 'connector', 'draw', 'frame', 'image', 'embed', 'ifc', 'card', 'table', 'code', 'comment', 'file', 'chart'])
 const COLOR = /^(#[0-9a-f]{3,8}|transparent|rgba?\(\s*[\d.]+%?\s*,\s*[\d.]+%?\s*,\s*[\d.]+%?\s*(,\s*[\d.]+%?\s*)?\))$/i
 const MAX = 1e7
+const PRESETS = FRAME_PRESETS.filter((p) => p.w).map((p) => p.label)
 
 type R = Record<string, unknown>
 const isObj = (v: unknown): v is R => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -143,9 +145,14 @@ export function normalizeItem(raw: unknown): Item | null {
       it = { ...base, type, pts, w0: num(raw.w0, base.w, 1e-3, 1e6), h0: num(raw.h0, base.h, 1e-3, 1e6), stroke: safeColor(raw.stroke, '#1c1e23'), size: num(raw.size, 4, 0.05, 2000), tool: oneOf(raw.tool, ['pen', 'highlighter'] as const, 'pen') }
       break
     }
-    case 'frame':
-      it = { ...base, type, title: str(raw.title, 200, 'Frame'), fill: safeColor(raw.fill, '#ffffff'), hidden: bool(raw.hidden) }
+    case 'frame': {
+      // Preset frames used to carry the preset in their title ("16:9 2"), which went stale on resize.
+      // It is now a separate tag that follows the frame's real proportions.
+      const old = raw.preset === undefined && typeof raw.title === 'string' ? /^(.+) (\d+)$/.exec(raw.title) : null
+      const legacy = old && PRESETS.includes(old[1]) ? old : null
+      it = { ...base, type, title: legacy ? `Frame ${legacy[2]}` : str(raw.title, 200, 'Frame'), fill: safeColor(raw.fill, '#ffffff'), hidden: bool(raw.hidden), preset: legacy ? legacy[1] : optOneOf(raw.preset, PRESETS) }
       break
+    }
     case 'image': {
       const src = safeAssetSrc(raw.src)
       if (!src) return null
