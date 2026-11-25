@@ -53,6 +53,14 @@ export default function Dashboard() {
     } catch (e) { setErr((e as Error).message); setBoards([]) }
   }
   useEffect(() => { if (!loading) load() }, [loading, me.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Boards created on another device or tab appear when this tab comes back into view.
+  useEffect(() => {
+    if (loading) return
+    const onShow = () => { if (document.visibilityState === 'visible') load() }
+    document.addEventListener('visibilitychange', onShow)
+    window.addEventListener('focus', onShow)
+    return () => { document.removeEventListener('visibilitychange', onShow); window.removeEventListener('focus', onShow) }
+  }, [loading, me.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const shown = useMemo(() => {
     const needle = q.trim().toLowerCase()
