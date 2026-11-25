@@ -226,7 +226,12 @@ export async function importFiles(files: File[], at: Pt) {
     if (box && !intersects(viewBox(), box)) fitBox(box, 80)
     toast(`Added ${created.filter((c) => c.type !== 'frame').length} item${created.length > 1 ? 's' : ''}`)
     // a model added on its own opens straight away: it can be orbited and zoomed at once, and the board gets a real preview
-    if (created.length === 1 && created[0].type === 'ifc') useBoard.setState({ editingId: created[0].id, selection: [created[0].id] })
+    if (created.length === 1 && created[0].type === 'ifc') {
+      // on a narrow screen it can land partly off the edge, where its controls cannot be reached
+      const v = viewBox()
+      if (box && (box.x < v.x || box.y < v.y || box.x + box.w > v.x + v.w || box.y + box.h > v.y + v.h)) fitBox(box, 80)
+      useBoard.setState({ editingId: created[0].id, selection: [created[0].id] })
+    }
   }
 }
 
