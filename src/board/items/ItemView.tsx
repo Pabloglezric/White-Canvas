@@ -5,6 +5,7 @@ import { initials } from '../../lib/util'
 import { useAsset } from '../assets'
 import { framePreset, inkOn } from '../defaults'
 import { capPath, connectorGeom, shapeInset, shapePath, strokeToPath } from '../geometry'
+import { statusColor, statusesOf } from '../layers'
 import { S, apply, commit, isPending, patchSilent, toast, update, useBoard } from '../store'
 import { ErrorBoundary } from '../ui/ErrorBoundary'
 import type {
@@ -314,6 +315,15 @@ function Votes({ it }: { it: Item }) {
   )
 }
 
+// ---------- status ----------
+
+/** The small status label drawn on an item. Cards already show their status as a chip. */
+function StatusBadge({ it }: { it: Item }) {
+  const settings = useBoard((s) => s.meta?.settings)
+  if (!it.status || it.type === 'card' || it.type === 'connector' || it.type === 'comment') return null
+  return <span className={`wc-status ${it.type === 'frame' ? 'is-right' : ''}`} style={{ background: statusColor(it.status, statusesOf(settings)) }}>{it.status}</span>
+}
+
 // ---------- shell ----------
 
 /** One item failing to render must never take the board down with it. */
@@ -356,6 +366,7 @@ const ItemBody = memo(function ItemBody({ id }: { id: string }) {
       {it.type === 'file' && <FileView it={it} />}
       {it.type === 'chart' && <ChartView it={it} />}
       <Votes it={it} />
+      <StatusBadge it={it} />
       {it.locked && selected && <span className="wc-lock"><Lock size={12} /></span>}
     </div>
   )

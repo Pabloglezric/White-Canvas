@@ -23,6 +23,22 @@ const optStr = (v: unknown, max: number) => (typeof v === 'string' && v ? (v.len
 const bool = (v: unknown) => (v === true ? true : undefined)
 const oneOf = <T extends string>(v: unknown, list: readonly T[], d: T): T => (list.includes(v as T) ? (v as T) : d)
 const optOneOf = <T extends string>(v: unknown, list: readonly T[]): T | undefined => (list.includes(v as T) ? (v as T) : undefined)
+/** Custom fields: a small flat map of short text values. Names that could shadow object internals are refused. */
+function fieldMap(v: unknown): Record<string, string> | undefined {
+  if (!isObj(v)) return undefined
+  const out: Record<string, string> = {}
+  let n = 0
+  for (const k of Object.keys(v)) {
+    const val = v[k]
+    const name = k.trim().slice(0, 60)
+    if (!name || name === '__proto__' || name === 'constructor' || name === 'prototype') continue
+    const text = typeof val === 'string' ? val.slice(0, 500) : typeof val === 'number' && Number.isFinite(val) ? String(val) : ''
+    if (!text) continue
+    out[name] = text
+    if (++n >= 20) break
+  }
+  return n ? out : undefined
+}
 const strList = (v: unknown, maxItems: number, maxLen: number) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, maxItems).map((x) => (x as string).slice(0, maxLen)) : undefined)
 
 /** http(s) only, and never this app's own origin (an embedded copy of the app would run with the user's session). */
@@ -115,6 +131,10 @@ export function normalizeItem(raw: unknown): Item | null {
     locked: bool(raw.locked),
     by: optStr(raw.by, 64),
     votes: strList(raw.votes, 500, 64),
+    layer: optStr(raw.layer, 64),
+    status: optStr(raw.status, 80),
+    subject: optStr(raw.subject, 200),
+    fields: fieldMap(raw.fields),
   }
   let it: Record<string, unknown>
   switch (type) {
@@ -175,7 +195,7 @@ export function normalizeItem(raw: unknown): Item | null {
       break
     }
     case 'card':
-      it = { ...base, type, title: str(raw.title, 400), desc: optStr(raw.desc, 6000), status: optStr(raw.status, 80), assignee: optStr(raw.assignee, 120), due: optStr(raw.due, 40), tags: strList(raw.tags, 20, 60), fill: safeColor(raw.fill, '#0090ff') }
+      it = { ...base, type, title: str(raw.title, 400), desc: optStr(raw.desc, 6000), assignee: optStr(raw.assignee, 120), due: optStr(raw.due, 40), tags: strList(raw.tags, 20, 60), fill: safeColor(raw.fill, '#0090ff') }
       break
     case 'table': {
       const rows = (Array.isArray(raw.cells) ? raw.cells : []).slice(0, 300).map((r) => (Array.isArray(r) ? r.slice(0, 40).map((c) => str(c, 6000)) : ['']))

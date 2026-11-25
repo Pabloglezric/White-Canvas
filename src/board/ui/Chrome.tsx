@@ -1,7 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  ArrowLeft, Check, ChevronLeft, ChevronRight, CloudOff, Download, Grid3x3, History, Keyboard, LayoutTemplate, ListTree,
+  ArrowLeft, Check, ChevronLeft, ChevronRight, CloudOff, Download, Grid3x3, History, Keyboard, Layers, LayoutTemplate, ListTree,
   Magnet, Map as MapIcon, Maximize, MessageCircle, Minus, Moon, MoreHorizontal, MousePointer2, Play, Plus, Search, Send,
   Share2, Sun, Timer, Trash2, Users, X,
 } from 'lucide-react'
@@ -127,6 +127,7 @@ export function TopBar() {
               {narrow && <button data-close onClick={() => panel('comments')}><MessageCircle size={16} /> Comments</button>}
               {narrow && <button data-close onClick={present}><Play size={16} /> Present frames</button>}
               <button data-close onClick={() => panel('frames')}><ListTree size={16} /> Frames outline</button>
+              <button data-close onClick={() => panel('layers')}><Layers size={16} /> Layers</button>
               {editor && <button data-close onClick={() => panel('templates')}><LayoutTemplate size={16} /> Templates</button>}
               <button data-close onClick={() => panel('export')}><Download size={16} /> Export</button>
               <button data-close onClick={() => panel('versions')}><History size={16} /> Version history</button>

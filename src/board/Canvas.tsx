@@ -3,7 +3,7 @@ import { aabb, connectorGeom, intersects, itemBox, toScreen, unionBoxes } from '
 import { DOM_ITEM_LIMIT, DOM_ITEM_RESUME, paintOverview, setThumbListener } from './overview'
 import { Interaction } from './interaction'
 import { ItemView } from './items/ItemView'
-import { S, animateCamera, canEdit, useBoard } from './store'
+import { S, animateCamera, canEdit, isHidden, useBoard } from './store'
 import type { Item } from './types'
 
 const LAYER: Record<string, number> = { frame: 0, comment: 2 }
@@ -12,7 +12,7 @@ const LAYER: Record<string, number> = { frame: 0, comment: 2 }
 export const view: { dom: string[]; overview: string[] | null; refresh: (() => void) | null } = { dom: [], overview: null, refresh: null }
 
 function computeVisible(): { dom: string[]; overview: string[] | null; lost: boolean } {
-  const { items, camera, viewport, showComments, editingId, selection } = S()
+  const { items, camera, viewport, showComments, editingId, selection, hiddenLayers } = S()
   const z = camera.z
   const collect = (margin: number) => {
     const mx = (viewport.w * margin) / z, my = (viewport.h * margin) / z
@@ -21,6 +21,7 @@ function computeVisible(): { dom: string[]; overview: string[] | null; lost: boo
     for (const id in items) {
       const it = items[id]
       if (it.type === 'comment' && (!showComments || it.resolved)) continue
+      if (isHidden(it, hiddenLayers)) continue
       if (intersects(box, itemBox(it, items))) out.push(it)
     }
     return out
@@ -29,7 +30,7 @@ function computeVisible(): { dom: string[]; overview: string[] | null; lost: boo
   let list = collect(0.35)
   const any = list.length > 0
   let hasContent = any
-  if (!any) for (const id in items) { if (items[id].type !== 'comment') { hasContent = true; break } }
+  if (!any) for (const id in items) { if (items[id].type !== 'comment' && !isHidden(items[id], hiddenLayers)) { hasContent = true; break } }
   const pinned = (id: string) => id === editingId || (selection.length === 1 && selection[0] === id)
   if (list.length > (view.overview ? DOM_ITEM_RESUME : DOM_ITEM_LIMIT)) {
     // Crowded view: paint everything on one canvas, keep only the item being worked on (and a few pins) in the DOM.
@@ -79,7 +80,7 @@ function useScene(canvasRef: React.RefObject<HTMLCanvasElement | null>): string[
     }
     const schedule = () => { if (!raf) raf = requestAnimationFrame(run) }
     const unsub = useBoard.subscribe((s, p) => {
-      if (s.items !== p.items || s.camera !== p.camera || s.viewport !== p.viewport || s.showComments !== p.showComments || s.editingId !== p.editingId || s.selection !== p.selection || s.theme !== p.theme) schedule()
+      if (s.items !== p.items || s.camera !== p.camera || s.viewport !== p.viewport || s.showComments !== p.showComments || s.editingId !== p.editingId || s.selection !== p.selection || s.theme !== p.theme || s.hiddenLayers !== p.hiddenLayers) schedule()
     })
     setThumbListener(schedule)
     // lets a caller bring the scene up to date immediately (used when editing starts, so the editor can take focus at once)

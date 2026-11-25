@@ -100,14 +100,70 @@ function bounds(items: J[]) {
   return { x: Math.round(x1), y: Math.round(y1), w: Math.round(x2 - x1), h: Math.round(y2 - y1) }
 }
 
+// ---------- layers, status, subject and custom fields (shared by every item type) ----------
+
+const LAYER_COLORS = ['#0090ff', '#30a46c', '#f76b15', '#e5484d', '#6e56cf', '#d6409f', '#d9a400', '#12a594', '#6b6f7a', '#1c1e23']
+const layerList = (board: J): J[] => (Array.isArray(board.settings?.layers) ? board.settings.layers.filter((l: J) => l && typeof l.id === 'string' && typeof l.name === 'string') : [])
+const layerNames = (board: J) => new Map<string, string>(layerList(board).map((l) => [l.id, l.name]))
+
+/** Custom fields: a small flat map of short text values (the same limits as the app). */
+function fieldMap(v: unknown, into: J = {}): J | undefined {
+  const out: J = { ...into }
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    for (const k of Object.keys(v as J)) {
+      const name = k.trim().slice(0, 60)
+      if (!name || name === '__proto__' || name === 'constructor' || name === 'prototype') continue
+      const val = (v as J)[k]
+      const text = typeof val === 'string' ? val.slice(0, 500) : typeof val === 'number' && Number.isFinite(val) ? String(val) : ''
+      if (text.trim()) out[name] = text
+      else delete out[name]
+    }
+  }
+  const keys = Object.keys(out).slice(0, 20)
+  return keys.length ? Object.fromEntries(keys.map((k) => [k, out[k]])) : undefined
+}
+
+/**
+ * Applies layer, status, subject and fields from the friendly input to an item. A layer is given by name and is
+ * created on the board when it does not exist yet; `added` collects those so the caller can save the board once.
+ */
+function applyDetails(spec: J, it: J, board: J, added: J[]) {
+  if (it.type === 'comment') return
+  const clear = (v: unknown) => v === null || v === ''
+  if (spec.layer !== undefined) {
+    if (clear(spec.layer)) delete it.layer
+    else {
+      const name = String(typeof spec.layer === 'object' ? '' : spec.layer).trim().slice(0, 60)
+      const all = [...layerList(board), ...added]
+      let hit = all.find((l) => l.id === name || l.name.toLowerCase() === name.toLowerCase())
+      if (!hit && name && all.length < 50) { hit = { id: crypto.randomUUID(), name, color: LAYER_COLORS[all.length % LAYER_COLORS.length] }; added.push(hit) }
+      if (hit) it.layer = hit.id
+    }
+  }
+  if (spec.status !== undefined) { if (clear(spec.status)) delete it.status; else it.status = str(spec.status, 80) }
+  if (spec.subject !== undefined) { if (clear(spec.subject)) delete it.subject; else it.subject = str(spec.subject, 200) }
+  if (spec.fields !== undefined) { const f = spec.fields === null ? undefined : fieldMap(spec.fields, it.fields); if (f) it.fields = f; else delete it.fields }
+}
+
+async function saveLayers(board: J, added: J[]) {
+  if (!added.length) return
+  const settings = { ...(board.settings || {}), layers: [...layerList(board), ...added] }
+  const { error } = await admin.from('boards').update({ settings }).eq('id', board.id)
+  if (error) throw dbError(error)
+}
+
 /** Compact, agent-friendly view of an item. */
-function describe(it: J, byId: Map<string, J>): J {
+function describe(it: J, byId: Map<string, J>, layers?: Map<string, string>): J {
   const o: J = { id: it.id, type: it.type }
   if (it.type !== 'connector') Object.assign(o, { x: Math.round(it.x), y: Math.round(it.y), w: Math.round(it.w), h: Math.round(it.h) })
   if (it.rot) o.rotation = it.rot
   if (it.parent && byId.get(it.parent)) o.frame = { id: it.parent, title: byId.get(it.parent)!.title }
   if (it.locked) o.locked = true
   if (it.votes?.length) o.votes = it.votes.length
+  if (it.layer && layers?.get(it.layer)) o.layer = layers.get(it.layer)
+  if (it.status) o.status = it.status
+  if (it.subject) o.subject = it.subject
+  if (it.fields) o.fields = it.fields
   switch (it.type) {
     case 'sticky': case 'text': o.text = plain(it.html); if (it.fill) o.color = it.fill; if (it.tags?.length) o.tags = it.tags; break
     case 'shape': o.shape = it.kind; o.text = plain(it.html); o.color = it.fill; break
@@ -139,7 +195,7 @@ function build(spec: J, ctx: Ctx): J {
     case 'text': { const fs = num(spec.font_size, 20); const lines = String(text).split('\n'); const w = num(spec.w, Math.min(640, Math.max(60, Math.max(...lines.map((l: string) => l.length)) * fs * 0.58 + 12))); it = { ...base(t, x, y, w, num(spec.h, Math.ceil(lines.length * fs * 1.3 + 4)), ctx), html: html(text), fontSize: fs, align: spec.align || 'left', bold: !!spec.bold, color: spec.text_color ? color(spec.text_color, '#1c1e23', true) : undefined }; break }
     case 'shape': it = { ...base(t, x, y, num(spec.w, 180), num(spec.h, 90), ctx), kind: SHAPES.includes(spec.shape) ? spec.shape : 'rect', html: html(text), fill: color(spec.color, '#ffffff'), stroke: color(spec.stroke, '#1c1e23', true), strokeW: num(spec.stroke_width, 2), fontSize: num(spec.font_size, 16), align: 'center', valign: 'middle' }; break
     case 'frame': it = { ...base(t, x, y, num(spec.w, 800), num(spec.h, 600), ctx), title: str(spec.title ?? text, 200) || 'Frame', fill: color(spec.color, '#ffffff') }; break
-    case 'card': it = { ...base(t, x, y, num(spec.w, 280), num(spec.h, 120), ctx), title: str(spec.title ?? text, 300) || '', desc: str(spec.description, 4000), status: str(spec.status, 60), assignee: str(spec.assignee, 80), due: str(spec.due, 40), tags: strList(spec.tags), fill: color(spec.color, '#0090ff', true) }; break
+    case 'card': it = { ...base(t, x, y, num(spec.w, 280), num(spec.h, 120), ctx), title: str(spec.title ?? text, 300) || '', desc: str(spec.description, 4000), assignee: str(spec.assignee, 80), due: str(spec.due, 40), tags: strList(spec.tags), fill: color(spec.color, '#0090ff', true) }; break
     case 'table': {
       const rows: string[][] = (Array.isArray(spec.rows) && spec.rows.length ? spec.rows.slice(0, 200) : [['']]).map((r: unknown[]) => (Array.isArray(r) ? r.slice(0, 30) : [r]).map((c) => (c == null || typeof c === 'object' ? '' : String(c).slice(0, 2000))))
       const cols = Math.max(1, ...rows.map((r) => r.length))
@@ -240,7 +296,7 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
       const byId = new Map(items.map((i) => [i.id, i]))
       const counts: J = {}
       for (const i of items) counts[i.type] = (counts[i.type] || 0) + 1
-      const head = { id: board.id, title: board.title, role, url: `${APP_URL}/board/${board.id}`, updated_at: board.updated_at, item_count: items.length, counts, bounds: bounds(items), frames: items.filter((i) => i.type === 'frame').map((f) => ({ id: f.id, title: f.title, x: Math.round(f.x), y: Math.round(f.y), w: Math.round(f.w), h: Math.round(f.h) })) }
+      const head = { id: board.id, title: board.title, role, url: `${APP_URL}/board/${board.id}`, updated_at: board.updated_at, item_count: items.length, counts, bounds: bounds(items), frames: items.filter((i) => i.type === 'frame').map((f) => ({ id: f.id, title: f.title, x: Math.round(f.x), y: Math.round(f.y), w: Math.round(f.w), h: Math.round(f.h) })), layers: layerList(board).map((l) => ({ name: l.name, items: items.filter((i) => i.layer === l.id).length })), statuses: Array.isArray(board.settings?.statuses) ? board.settings.statuses.map((s: J) => s?.name).filter(Boolean) : ['Open', 'In progress', 'For review', 'Closed'], fields: Array.isArray(board.settings?.fields) ? board.settings.fields : [] }
       if (a.view === 'summary') return head
       let list = items
       if (Array.isArray(a.types) && a.types.length) list = list.filter((i) => a.types.includes(i.type))
@@ -248,7 +304,7 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
       if (a.view === 'outline') {
         const groups = new Map<string, string[]>()
         for (const i of list.sort((p, q) => p.y - q.y || p.x - q.x)) {
-          const d = describe(i, byId)
+          const d = describe(i, byId, layerNames(board))
           const text = d.text || d.title || d.label || d.code || (d.rows ? d.rows.map((r: string[]) => r.join(' | ')).join('\n') : '') || (d.thread ? d.thread.map((t: J) => `${t.by}: ${t.text}`).join(' / ') : '')
           if (!text || i.type === 'frame') continue
           const key = i.parent && byId.get(i.parent) ? byId.get(i.parent)!.title : '(outside frames)'
@@ -258,12 +314,12 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
         return { ...head, outline: [...groups].map(([k, v]) => `## ${k}\n${v.join('\n')}`).join('\n\n') }
       }
       const limit = Math.max(1, Math.min(2000, num(a.limit, 500)))
-      return { ...head, items: list.slice(0, limit).map((i) => describe(i, byId)), truncated: list.length > limit }
+      return { ...head, items: list.slice(0, limit).map((i) => describe(i, byId, layerNames(board))), truncated: list.length > limit }
     },
   },
   {
     name: 'create_items', write: true,
-    description: 'Add items to a board. Each item has a type: sticky, text, shape, frame, card, table, code, embed, image, chart, comment or connector. Leave out x/y to have items laid out automatically in free space. Give an item a "ref" to connect to it from a connector in the same call (connector from/to accept item ids or refs). Colours accept names (yellow, orange, red, pink, purple, blue, teal, green, gray, white, black) or hex. Coordinates are board pixels; y grows downward.',
+    description: 'Add items to a board. Each item has a type: sticky, text, shape, frame, card, table, code, embed, image, chart, comment or connector. Leave out x/y to have items laid out automatically in free space. Give an item a "ref" to connect to it from a connector in the same call (connector from/to accept item ids or refs). Colours accept names (yellow, orange, red, pink, purple, blue, teal, green, gray, white, black) or hex. Coordinates are board pixels; y grows downward. Any item may also carry a layer (by name; created if new), a status, a subject and fields (an object of custom field values).',
     inputSchema: {
       type: 'object', required: ['board_id', 'items'],
       properties: {
@@ -278,6 +334,7 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
               text: { type: 'string' }, color: { type: 'string' }, font_size: { type: 'number' }, title: { type: 'string' }, frame: { type: 'string', description: 'id or ref of a frame to place this item in' },
               shape: { type: 'string', enum: SHAPES }, stroke: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } },
               description: { type: 'string' }, status: { type: 'string' }, assignee: { type: 'string' }, due: { type: 'string' },
+              layer: { type: 'string', description: 'Layer name; created on the board if it does not exist' }, subject: { type: 'string' }, fields: { type: 'object', description: 'Custom field values by field name', additionalProperties: { type: 'string' } },
               rows: { type: 'array', items: { type: 'array', items: { type: 'string' } } }, header: { type: 'boolean' },
               code: { type: 'string' }, language: { type: 'string' }, url: { type: 'string' }, as_link: { type: 'boolean' }, alt: { type: 'string' },
               kind: { type: 'string', enum: ['bar', 'line', 'pie'] }, labels: { type: 'array', items: { type: 'string' } }, values: { type: 'array', items: { type: 'number' } },
@@ -289,7 +346,8 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
       },
     },
     run: async (a, ctx) => {
-      await needWrite(ctx, a.board_id)
+      const { board } = await needWrite(ctx, a.board_id)
+      const newLayers: J[] = []
       if (!Array.isArray(a.items) || !a.items.length) throw new Error('items must be a non-empty array')
       if (a.items.length > 500) throw new Error('At most 500 items per call')
       const existing = await loadItems(a.board_id)
@@ -299,7 +357,7 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
       const grown: J[] = []
       const specs = a.items as J[]
       const built = new Map<J, J>()
-      for (const s of specs) if (s.type !== 'connector') { const it = build(s, ctx); built.set(s, it); fresh.push(it); if (s.ref) refs.set(String(s.ref), it.id) }
+      for (const s of specs) if (s.type !== 'connector') { const it = build(s, ctx); applyDetails(s, it, board, newLayers); built.set(s, it); fresh.push(it); if (s.ref) refs.set(String(s.ref), it.id) }
       const resolve = (r: unknown) => (typeof r === 'string' ? refs.get(r) || (ids.has(r) ? r : undefined) : undefined)
       for (const s of specs) {
         const it = built.get(s)
@@ -324,19 +382,21 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
         const bottom = Math.max(...kids.map((i) => i.y + i.h)) + 30
         if (bottom > f.y + f.h) { f.h = bottom - f.y; if (!fresh.includes(f)) { f.rev = (f.rev || 0) + 1; grown.push(f) } }
       }
-      for (const s of specs) if (s.type === 'connector') fresh.push(connector(s, resolve, ctx))
+      for (const s of specs) if (s.type === 'connector') { const c = connector(s, resolve, ctx); applyDetails(s, c, board, newLayers); fresh.push(c) }
       adoptFrames(fresh, [...existing, ...fresh])
       stamp(fresh, existing)
+      await saveLayers(board, newLayers)
       await saveItems(a.board_id, [...fresh, ...grown])
       return { created: specs.map((s) => { const it = built.get(s); return it ? { ref: s.ref, id: it.id, type: it.type, x: Math.round(it.x), y: Math.round(it.y), w: Math.round(it.w), h: Math.round(it.h) } : null }).filter(Boolean), connectors: fresh.filter((i) => i.type === 'connector').map((i) => i.id), url: `${APP_URL}/board/${a.board_id}` }
     },
   },
   {
     name: 'update_items', write: true,
-    description: 'Change existing items. Each update needs the item id plus any of: x, y, w, h, rotation, text, color, title, label, locked, frame (id or null), shape, status, assignee, due, description, tags, rows, code, resolved (comments), reply (adds a comment reply).',
+    description: 'Change existing items. Each update needs the item id plus any of: x, y, w, h, rotation, text, color, title, label, locked, frame (id or null), shape, status, assignee, due, description, tags, rows, code, resolved (comments), reply (adds a comment reply). Every item type also takes layer (by name; created if new), status, subject and fields (an object; an empty value removes that field); null clears layer, status, subject or fields.',
     inputSchema: { type: 'object', required: ['board_id', 'updates'], properties: { board_id: { type: 'string' }, updates: { type: 'array', items: { type: 'object', required: ['id'], properties: { id: { type: 'string' } }, additionalProperties: true } } } },
     run: async (a, ctx) => {
-      await needWrite(ctx, a.board_id)
+      const { board } = await needWrite(ctx, a.board_id)
+      const newLayers: J[] = []
       const existing = await loadItems(a.board_id)
       const byId = new Map(existing.map((i) => [i.id, i]))
       const changed: J[] = [], missing: string[] = []
@@ -358,7 +418,8 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
         if (u.color != null) { if (n.type === 'connector' || n.type === 'draw') n.stroke = color(u.color, n.stroke, true); else if (n.type === 'card') n.fill = color(u.color, n.fill, true); else n.fill = color(u.color, n.fill) }
         if (u.shape && n.type === 'shape' && SHAPES.includes(u.shape)) n.kind = u.shape
         if (typeof u.font_size === 'number') n.fontSize = Math.max(4, Math.min(400, num(u.font_size, 16)))
-        if (n.type === 'card') { if (u.description != null) n.desc = str(u.description, 4000); for (const k of ['status', 'assignee', 'due']) if (u[k] != null) n[k] = str(u[k], 80) }
+        if (n.type === 'card') { if (u.description != null) n.desc = str(u.description, 4000); for (const k of ['assignee', 'due']) if (u[k] != null) n[k] = str(u[k], 80) }
+        applyDetails(u, n, board, newLayers)
         if (Array.isArray(u.tags)) n.tags = strList(u.tags)
         if (n.type === 'table' && Array.isArray(u.rows)) { const t = build({ type: 'table', rows: u.rows, x: n.x, y: n.y }, ctx); Object.assign(n, { cells: t.cells, colW: t.colW, rowH: t.rowH, w: t.w, h: t.h }) }
         if (n.type === 'code' && u.code != null) n.code = str(u.code, 100000)
@@ -366,6 +427,7 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
         n.rev = (it.rev || 0) + 1
         changed.push(n)
       }
+      await saveLayers(board, newLayers)
       if (changed.length) await saveItems(a.board_id, changed)
       return { updated: changed.map((i) => i.id), not_found: missing }
     },
@@ -461,11 +523,12 @@ const tools: { name: string; description: string; inputSchema: J; write?: boolea
     name: 'search_board', description: 'Find items on a board whose text contains the query.',
     inputSchema: { type: 'object', required: ['board_id', 'query'], properties: { board_id: { type: 'string' }, query: { type: 'string' } } },
     run: async (a, ctx) => {
-      await roleFor(ctx, a.board_id)
+      const { board } = await roleFor(ctx, a.board_id)
+      const layers = layerNames(board)
       const items = await loadItems(a.board_id)
       const byId = new Map(items.map((i) => [i.id, i]))
       const q = String(a.query || '').toLowerCase()
-      return items.map((i) => describe(i, byId)).filter((d) => JSON.stringify([d.text, d.title, d.label, d.code, d.rows, d.thread, d.url, d.name, d.description]).toLowerCase().includes(q)).slice(0, 100)
+      return items.map((i) => describe(i, byId, layers)).filter((d) => JSON.stringify([d.text, d.title, d.label, d.code, d.rows, d.thread, d.url, d.name, d.description, d.layer, d.status, d.subject, d.fields]).toLowerCase().includes(q)).slice(0, 100)
     },
   },
 ]

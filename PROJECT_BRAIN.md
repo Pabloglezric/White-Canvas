@@ -82,21 +82,46 @@ Research only, nothing built. Report: `reports/Bluebeam capabilities for White C
   for their developer programme. The aim is to beat it by learning from its mistakes, not to copy it.
 - The project is tracked on a White Canvas board, not in documents: decisions due, questions both ways, tools with estimates,
   lessons, the app's own screens ("inception window") and a code map. The owner comments on the board.
-- `scripts/project-board.mjs` builds the board as a `.whitecanvas.json` file (drop it on any board). The plan lives in that
-  script until a live board exists. Options: `--graph <graph.json>` adds the code map, `--shots <dir>` adds screenshots.
-- Going live needs an agent token for Claude: a network secret on the `white-canvas` cloud environment for the agent server host.
-  Until then the board is rebuilt and sent as a file.
+- The live board is "White Canvas", id `41d70a4d-a968-4581-98d3-329bf72cb6ac`. It is the source of truth; Claude reads
+  it at the start of a session and updates it through the agent server (JSON-RPC `tools/call` posted to the agent server URL).
+- `scripts/project-board.mjs` rebuilds the same board as a `.whitecanvas.json` file (drop it on any board): the fallback when
+  the live board cannot be reached. Keep its text in step with the live board. Options: `--graph <graph.json>` adds the
+  code map, `--shots <dir>` adds screenshots.
+- Claude's agent token is a network secret for the agent server host, saved on both the `Default` and the `white-canvas`
+  cloud environments (sessions start on `Default`; a token on `white-canvas` alone never arrives). The proxy adds it;
+  no header is sent by hand.
+- Decisions on the board are numbered D1, D2, … in the order they were raised. A number never changes meaning: new
+  decisions go at the end. The owner refers to them by number.
+- Owner decisions on 2026-11-25: D3 start with Phase 1 · Foundations (Claude's reading of "start with stage 1"); D5 the
+  inception window uses screenshots; D6 Graphify is rebuilt at the start of every session and after each merge.
 - Graphify (`graphifyy` on PyPI, Apache-2.0) maps the code locally in about 4 seconds with no AI cost: `graphify update .`
   Used to draw the code map, to trace what a change touches, and to save reading whole files. The graph is rebuilt per
-  session, not stored in the repository. No hooks or assistant integration are installed yet (owner decision pending).
+  session, not stored in the repository (`graphify-out/` is ignored). No hooks or assistant integration are installed.
 - Cards show their whole description (the three-line cut was removed in `src/index.css`). A card's date field is a real date;
   estimates go in tags until cards get an estimate field.
 - The app refuses to be framed, itself included (`frame-ancestors 'none'` in `vercel.json`), so the inception window uses screenshots.
 
+## Layers, status and custom fields (2026-11-25, Phase 1, first tool)
+
+- Every item type can carry `layer` (id), `status` (free text), `subject` and `fields` (custom values by field name):
+  base fields in `types.ts`, accepted for all types in `validate.ts`. A card's status is that same `status` field.
+- The lists behind them are board settings (`layers`, `statuses`, `fields`), shared with everyone. `src/board/layers.ts`
+  only reads them (safe against any stored value); `src/board/details.ts` changes them and the values on items;
+  the screens are in `src/board/ui/Details.tsx` (Details button on the selection bar, Layers panel in the menu).
+- Hiding a layer is each person's own view, kept on the device per board (`hiddenLayers` in the store, `isHidden`).
+  Hidden items are left out of drawing, marquee, select all, Tab order, snapping and picture or PDF export. Nothing
+  about hiding is written to the board. Anything new that lists or picks items should check `isHidden`.
+- The lists travel with a duplicated board and with a board file (`sharedLists`, `adoptLists`); the timer and voting do not.
+- The agent server reads and writes all four on every item type (a layer is given by name and created if new).
+  The edge function must be deployed separately after the app change is live: an older app drops fields it does not know.
+- Not built: locking a layer, layers shared-hidden for everyone, a record of who changed a status when, status on
+  the crowded-view canvas and in picture export, carrying layers across a paste between two boards, an "active layer"
+  for new items, server-stamped created/updated times.
+
 ## Tests
 
-- `npm run test:unit` — 75 tests (geometry, store, validation, sync, previews).
-- `npm run test:e2e` — 31 tests on the production build: device-only boards on desktop and two Fold touch sizes, app
+- `npm run test:unit` — 94 tests (geometry, store, validation, sync, previews, item details).
+- `npm run test:e2e` — 32 tests on the production build: device-only boards on desktop and two Fold touch sizes, app
   updates, and "live" tests with two signed-in devices on one board. The live tests run against a second build
   (`dist-live`) pointed at a stand-in backend, `tests/e2e/backend.ts` (REST answers plus a realtime hub with presence
   and broadcast). Use it for anything that only shows with an account or a second device.

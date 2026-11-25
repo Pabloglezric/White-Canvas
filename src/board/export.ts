@@ -4,8 +4,9 @@ import { resolveAsset } from './assets'
 import { FONT_STACK, inkOn } from './defaults'
 import { aabb, capPath, connectorGeom, itemBox, shapeInset, shapePath, unionBoxes } from './geometry'
 import { inkPath } from './items/ItemView'
+import { fieldsOf, layersOf, sharedLists } from './layers'
 import { paintOverview } from './overview'
-import { S } from './store'
+import { S, isHidden } from './store'
 import type { Box, Item, TextStyle } from './types'
 import { safeColor } from './validate'
 
@@ -286,8 +287,10 @@ export function exportArea(scope: 'selection' | 'all' | string = 'all'): ExportA
     const f = items[scope]
     box = aabb(f)
     list = Object.values(items).filter((i) => i.id === f.id || i.parent === f.id || (i.type === 'connector' && (() => { const b = itemBox(i, items); return b.x >= box!.x && b.y >= box!.y && b.x + b.w <= box!.x + box!.w && b.y + b.h <= box!.y + box!.h })()))
+    // a picture shows what this person sees: layers they have hidden stay out
+    list = list.filter((i) => !isHidden(i))
   } else {
-    list = Object.values(items)
+    list = Object.values(items).filter((i) => !isHidden(i))
     box = unionBoxes(list.filter((i) => i.type !== 'comment').map((i) => itemBox(i, items)))
   }
   list = list.filter((i) => i.type !== 'comment')
@@ -361,7 +364,7 @@ export async function exportPdf(scope: 'frames' | 'all' | 'selection') {
 
 export function exportJson() {
   const { items, meta } = S()
-  download(`${safeName(meta?.title || '')}.whitecanvas.json`, JSON.stringify({ app: 'white-canvas', version: 1, title: meta?.title, exported_at: new Date().toISOString(), items: Object.values(items) }, null, 1), 'application/json')
+  download(`${safeName(meta?.title || '')}.whitecanvas.json`, JSON.stringify({ app: 'white-canvas', version: 1, title: meta?.title, exported_at: new Date().toISOString(), lists: sharedLists(meta?.settings), items: Object.values(items) }, null, 1), 'application/json')
 }
 
 export function exportCsv() {
@@ -369,7 +372,9 @@ export function exportCsv() {
   const frames = items
   // cells that look like formulas are neutralised so a spreadsheet never executes board text
   const esc = (v: unknown) => { const t = String(v ?? ''); return `"${(/^[=+\-@\t\r]/.test(t) ? "'" + t : t).replace(/"/g, '""')}"` }
-  const rows = [['type', 'text', 'frame', 'color', 'tags', 'votes', 'x', 'y'].join(',')]
+  const layerName = new Map(layersOf(meta?.settings).map((l) => [l.id, l.name]))
+  const fieldNames = fieldsOf(meta?.settings)
+  const rows = [['type', 'text', 'frame', 'color', 'tags', 'votes', 'x', 'y', 'layer', 'status', 'subject', ...fieldNames.map(esc)].join(',')]
   for (const it of sortItems(Object.values(items))) {
     let text = ''
     if (it.type === 'sticky' || it.type === 'text' || it.type === 'shape') text = htmlToText(it.html)
@@ -378,7 +383,7 @@ export function exportCsv() {
     else continue
     if (!text) continue
     const frame = it.parent && frames[it.parent]?.type === 'frame' ? (frames[it.parent] as { title: string }).title : ''
-    rows.push([esc(it.type), esc(text), esc(frame), esc('fill' in it ? it.fill : ''), esc('tags' in it ? (it.tags || []).join(' ') : ''), it.votes?.length || 0, Math.round(it.x), Math.round(it.y)].join(','))
+    rows.push([esc(it.type), esc(text), esc(frame), esc('fill' in it ? it.fill : ''), esc('tags' in it ? (it.tags || []).join(' ') : ''), it.votes?.length || 0, Math.round(it.x), Math.round(it.y), esc(it.layer ? layerName.get(it.layer) || '' : ''), esc(it.status || ''), esc(it.subject || ''), ...fieldNames.map((f) => esc(it.fields?.[f] || ''))].join(','))
   }
   download(`${safeName(meta?.title || '')}.csv`, rows.join('\n'), 'text/csv')
 }

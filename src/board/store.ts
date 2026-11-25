@@ -8,7 +8,7 @@ import type { BoardMeta, Box, Camera, Item, Peer, Role, Route, ShapeKind, Tool }
 export type Patch = Record<string, Item | null>
 interface HistoryEntry { before: Patch; after: Patch }
 
-export type PanelId = null | 'comments' | 'frames' | 'versions' | 'search' | 'templates' | 'share' | 'export' | 'shortcuts' | 'insert' | 'facilitate' | 'menu'
+export type PanelId = null | 'comments' | 'frames' | 'versions' | 'search' | 'templates' | 'share' | 'export' | 'shortcuts' | 'insert' | 'facilitate' | 'menu' | 'layers'
 
 interface Prefs {
   grid: 'dots' | 'lines' | 'none'
@@ -63,6 +63,7 @@ export interface BoardState extends Prefs {
   presenting: number | null // index into ordered frames
   overview: boolean // true while the board is drawn by the overview canvas instead of DOM
   lost: boolean // content exists but none of it is on screen
+  hiddenLayers: string[] // layer ids this person has hidden on this board (kept on the device, not shared)
   undo: HistoryEntry[]
   redo: HistoryEntry[]
   toast: { id: number; text: string } | null
@@ -100,6 +101,7 @@ export const useBoard = create<BoardState>()(
     presenting: null,
     overview: false,
     lost: false,
+    hiddenLayers: [],
     undo: [],
     redo: [],
     toast: null,
@@ -276,12 +278,25 @@ export function applyRemote(upserts: Item[], removes: { id: string; rev: number 
   useBoard.setState(patch)
 }
 
+/** True when the item sits on a layer this person has hidden. An unknown layer id never hides anything. */
+export const isHidden = (it: Item, hidden: readonly string[] = S().hiddenLayers) => !!it.layer && hidden.length > 0 && hidden.includes(it.layer)
+
+export const hiddenLayersKey = (boardId: string) => `wc.layers.hidden.${boardId}`
+function loadHiddenLayers(boardId: string | null | undefined): string[] {
+  if (!boardId) return []
+  try {
+    const v = JSON.parse(localStorage.getItem(hiddenLayersKey(boardId)) || '[]')
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, 50) : []
+  } catch { return [] }
+}
+
 export function resetBoard(partial: Partial<BoardState>) {
   pending.clear()
   tombs.clear()
   useBoard.setState({
     items: {}, selection: [], editingId: null, tool: 'select', peers: {}, following: null, guides: [], marquee: null, connectHover: null, ctxMenu: null,
-    panel: null, activeComment: null, presenting: null, overview: false, lost: false, undo: [], redo: [], camera: { x: 0, y: 0, z: 1 }, ...partial,
+    panel: null, activeComment: null, presenting: null, overview: false, lost: false, undo: [], redo: [], camera: { x: 0, y: 0, z: 1 },
+    hiddenLayers: loadHiddenLayers(partial.boardId), ...partial,
   })
 }
 

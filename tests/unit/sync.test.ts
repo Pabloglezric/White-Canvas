@@ -150,6 +150,15 @@ describe('duplicating a cloud board', () => {
     ]
   })
 
+  it('copies the layers, statuses and fields its items refer to, but not the timer or voting', async () => {
+    const layers = [{ id: 'L1', name: 'Structure', color: '#30a46c' }]
+    await duplicateBoard({ ...original, settings: { layers, fields: ['Trade'], timer: { endsAt: 5, duration: 60 }, voting: { open: true, max: 3 } } }, true)
+    expect(cloud.boards[0].settings).toEqual({ layers, fields: ['Trade'] })
+    cloud.boards = []
+    await duplicateBoard(original, true)
+    expect('settings' in cloud.boards[0]).toBe(false)
+  })
+
   it('gives the copy its own files, so it outlives the original and any access to it', async () => {
     const id = await duplicateBoard(original, true)
     expect(id).toBe(NEW_ID)

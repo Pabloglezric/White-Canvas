@@ -15,6 +15,7 @@ import { S, apply, canEdit, fitBox, orderedFrames, toast, useBoard, viewCenter, 
 import { listVersions, loadVersion, saveVersion, updateMeta, type Version } from '../sync'
 import { TEMPLATES } from '../templates'
 import type { CommentItem, Item } from '../types'
+import { LayersPanel } from './Details'
 import { confirmDialog } from './dialogs'
 import { Modal, Panel } from './kit'
 
@@ -465,6 +466,7 @@ export function Panels() {
     case 'templates': return <TemplatesPanel />
     case 'comments': return <CommentsPanel />
     case 'frames': return <FramesPanel />
+    case 'layers': return <LayersPanel />
     case 'search': return <SearchPanel />
     case 'versions': return <VersionsPanel />
     case 'export': return <ExportPanel />
