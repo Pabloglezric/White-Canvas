@@ -1,5 +1,5 @@
 // Fixes for boards and people that showed up differently on two devices of the same account.
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const cloud = vi.hoisted(() => ({ boards: [] as any[], items: [] as any[], versions: [] as any[], uploads: [] as string[], deleted: [] as string[], failItems: false, source: [] as any[], files: [] as string[], copies: [] as string[][], failCopy: '' }))
 const NEW_ID = '11111111-1111-4111-8111-111111111111'
@@ -40,11 +40,12 @@ vi.mock('../../src/lib/supabase', () => {
 
 import { get, set } from 'idb-keyval'
 import { FRAME_PRESETS, framePreset, make } from '../../src/board/defaults'
-import { people } from '../../src/board/store'
+import { adoptForeignFiles, copySelection, pasteItems } from '../../src/board/ops'
+import { S, hooks, people, redo, resetBoard, undo, useBoard } from '../../src/board/store'
 import { localBoards, saveLocalBoards, saveLocalItems } from '../../src/board/sync'
 import { normalizeItem } from '../../src/board/validate'
 import { deleteBoard, duplicateBoard, moveToAccount, type BoardRow } from '../../src/lib/boards'
-import type { BoardMeta, FrameItem, ImageItem, Item, Peer } from '../../src/board/types'
+import type { BoardMeta, FileItem, FrameItem, IfcItem, ImageItem, Item, Peer } from '../../src/board/types'
 
 describe('frame preset tag', () => {
   const a4 = FRAME_PRESETS.find((p) => p.label === 'A4 portrait')!
@@ -204,5 +205,143 @@ describe('duplicating a cloud board', () => {
     expect(cloud.copies).toEqual([])
     expect(cloud.uploads).toEqual([])
     expect(cloud.boards).toEqual([])
+  })
+})
+
+describe('pasting into a cloud board', () => {
+  const A = '22222222-2222-4222-8222-222222222222'
+  const image = (src: string, thumb?: string) => ({ ...make.image({ x: 0, y: 0, src }), ...(thumb ? { thumb } : null) }) as ImageItem
+  const open = (boardId: string, items: Item[] = []) => resetBoard({ boardId, role: 'owner', status: 'ready', items: Object.fromEntries(items.map((i) => [i.id, i])) })
+  /** Copies everything on the board that is open, the way Ctrl+C does. */
+  const copyAll = () => { useBoard.setState({ selection: Object.keys(S().items) }); copySelection() }
+  const refs = () => Object.values(S().items).flatMap((it) => [(it as ImageItem).src, (it as ImageItem).thumb]).filter((r): r is string => typeof r === 'string' && /^(asset|local):/.test(r))
+  const settled = (boardId: string) => vi.waitFor(() => { expect(refs().length).toBeGreaterThan(0); expect(refs().every((r) => r.startsWith(`asset:${boardId}/`))).toBe(true) })
+  let saved: Item[]
+
+  beforeEach(() => {
+    Object.assign(cloud, { boards: [], items: [], versions: [], uploads: [], deleted: [], failItems: false, source: [], copies: [], failCopy: '' })
+    cloud.files = [`${A}/plan.png`, `${A}/plan-small.webp`, `${A}/page-1.png`, `${A}/tower.ifc`, `${A}/brief.pdf`]
+    open(A, [
+      make.sticky({ x: 0, y: 0, html: 'note' }),
+      image(`asset:${A}/plan.png`, `asset:${A}/plan-small.webp`),
+      image(`asset:${A}/plan.png`), // the same file placed twice
+      image(`asset:${A}/page-1.png`), // a PDF page
+      make.ifc({ x: 0, y: 0, src: `asset:${A}/tower.ifc`, name: 'tower.ifc' }),
+      make.file({ x: 0, y: 0, src: `asset:${A}/brief.pdf`, name: 'brief.pdf' }),
+      image('https://example.com/photo.jpg'),
+    ])
+    saved = []
+    hooks.onCommit = (changed) => { saved.push(...changed) }
+    useBoard.setState({ toast: null })
+  })
+  afterEach(() => { hooks.onCommit = undefined })
+
+  it('shows the items at once, then gives the board its own files, so they outlive the other board and any access to it', async () => {
+    const B = '44444444-4444-4444-8444-000000000001'
+    copyAll()
+    open(B)
+    pasteItems()
+    expect(Object.keys(S().items)).toHaveLength(7) // nothing waits for the copies
+    expect(refs().every((r) => r.startsWith(`asset:${A}/`))).toBe(true)
+    await settled(B)
+    expect(cloud.copies.map(([from]) => from).sort()).toEqual([`${A}/brief.pdf`, `${A}/page-1.png`, `${A}/plan-small.webp`, `${A}/plan.png`, `${A}/tower.ifc`]) // once per file
+    const items = Object.values(S().items)
+    const [plan, again, page, web] = items.filter((i): i is ImageItem => i.type === 'image').sort((a, b) => a.z - b.z)
+    expect(plan.src).toMatch(new RegExp(`^asset:${B}/[\\w-]+\\.png$`))
+    expect(plan.thumb).toMatch(new RegExp(`^asset:${B}/[\\w-]+\\.webp$`))
+    expect(again.src).toBe(plan.src)
+    expect(page.src).not.toBe(plan.src)
+    expect(web.src).toBe('https://example.com/photo.jpg')
+    expect((items.find((i) => i.type === 'ifc') as IfcItem).src).toMatch(new RegExp(`^asset:${B}/[\\w-]+\\.ifc$`))
+    expect((items.find((i) => i.type === 'file') as FileItem).src).toMatch(new RegExp(`^asset:${B}/[\\w-]+\\.pdf$`))
+    expect(items.every((i) => normalizeItem(i))).toBe(true) // the new references are ones the board accepts
+
+    // what is saved, and sent to everyone else on the board, ends up pointing into this board's folder: the only
+    // folder its members are sure to be able to read
+    const last = new Map(saved.map((i) => [i.id, i]))
+    expect(last.size).toBe(7)
+    expect([...last.values()].flatMap((i) => [(i as ImageItem).src, (i as ImageItem).thumb]).filter((r) => r?.startsWith('asset:')).every((r) => r!.startsWith(`asset:${B}/`))).toBe(true)
+
+    // the board they came from is deleted: nothing pasted depends on it
+    await deleteBoard({ id: A } as BoardRow)
+    expect(cloud.files).toHaveLength(5)
+    expect(refs()).toHaveLength(6)
+    expect(refs().every((r) => cloud.files.includes(r.slice(6)))).toBe(true)
+
+    // undo and redo do not bring the old references back, and pasting again copies nothing twice
+    undo()
+    expect(Object.keys(S().items)).toHaveLength(0)
+    redo()
+    expect(refs()).toHaveLength(6)
+    expect(refs().every((r) => r.startsWith(`asset:${B}/`))).toBe(true)
+    pasteItems()
+    expect(Object.keys(S().items)).toHaveLength(14)
+    expect(refs().every((r) => r.startsWith(`asset:${B}/`))).toBe(true)
+    expect(cloud.copies).toHaveLength(5)
+  })
+
+  it('copies nothing when pasting within the same board', async () => {
+    copyAll()
+    pasteItems()
+    await adoptForeignFiles()
+    expect(Object.keys(S().items)).toHaveLength(14)
+    expect(cloud.copies).toEqual([])
+    expect(cloud.uploads).toEqual([])
+    expect(refs().every((r) => r.startsWith(`asset:${A}/`))).toBe(true)
+  })
+
+  it('keeps the old reference when a copy fails, says so, and tries again later', async () => {
+    const B = '44444444-4444-4444-8444-000000000002'
+    cloud.failCopy = `${A}/tower.ifc`
+    copyAll()
+    open(B)
+    pasteItems()
+    await vi.waitFor(() => expect(S().toast?.text).toMatch(/could not be copied/))
+    expect(Object.keys(S().items)).toHaveLength(7) // the paste itself stands
+    const model = () => Object.values(S().items).find((i) => i.type === 'ifc') as IfcItem
+    expect(model().src).toBe(`asset:${A}/tower.ifc`) // still opens for whoever can reach the original
+    expect(refs().filter((r) => r.startsWith(`asset:${B}/`))).toHaveLength(5) // the files that did arrive are in use
+    cloud.failCopy = ''
+    await adoptForeignFiles({ quiet: true }) // what opening the board, or coming back online, does
+    expect(model().src).toMatch(new RegExp(`^asset:${B}/`))
+    expect(cloud.copies.filter(([from]) => from === `${A}/plan.png`)).toHaveLength(1)
+  })
+
+  it('leaves a file that is gone, or out of reach, where it was and does not keep asking for it', async () => {
+    const B = '44444444-4444-4444-8444-000000000003'
+    cloud.files = []
+    open(B)
+    pasteItems([image(`asset:${A}/plan.png`)])
+    await adoptForeignFiles()
+    await adoptForeignFiles()
+    expect(refs()).toEqual([`asset:${A}/plan.png`])
+    expect(cloud.copies).toEqual([])
+    expect(S().toast).toBeNull()
+  })
+
+  it('uploads device files pasted from a device-only board', async () => {
+    const B = '44444444-4444-4444-8444-000000000004'
+    await set('wc.asset.sketch', new Blob(['sketch']))
+    open('local-source', [image('local:sketch'), image('local:sketch')])
+    copyAll()
+    open(B)
+    pasteItems()
+    await settled(B)
+    expect(cloud.uploads).toHaveLength(1)
+    expect(cloud.uploads[0]).toMatch(new RegExp(`^${B}/`))
+    expect(new Set(refs()).size).toBe(1)
+  })
+
+  it('leaves references alone on a device-only board, and for someone who cannot edit', async () => {
+    copyAll()
+    open('local-target')
+    pasteItems()
+    await adoptForeignFiles()
+    expect(refs().every((r) => r.startsWith(`asset:${A}/`))).toBe(true)
+    const B = '44444444-4444-4444-8444-000000000005'
+    resetBoard({ boardId: B, role: 'viewer', status: 'ready', items: { x: image(`asset:${A}/plan.png`) } })
+    await adoptForeignFiles()
+    expect(cloud.copies).toEqual([])
+    expect(cloud.uploads).toEqual([])
   })
 })
