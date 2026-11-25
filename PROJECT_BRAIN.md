@@ -66,6 +66,33 @@ Duplicated cloud boards get their own files (`adoptAssets` in `src/lib/boards.ts
 anything that puts items into a cloud board from elsewhere should go through `adoptAssets`. Branch `claude/loving-bohr-s5ikwd`,
 built on top of the sync fixes.
 
+## Bluebeam research (2026-11-25)
+
+Research only, nothing built. Report: `reports/Bluebeam capabilities for White Canvas.md`; sourced notes in
+`research_notes/Bluebeam capabilities for White Canvas/`.
+
+- Direction recommended: build drawing review natively, exchange data with Bluebeam through standard PDF annotations.
+- Three foundations gate the rest: a retained vector PDF sheet, per-sheet scale with point-list geometry, cross-type item metadata.
+- Open decision for the owner: the Bluebeam Developer Terms restrict building similar features, so API sign-up is not a default.
+- Untested: whether Revu honours a `/Measure` dictionary written by another tool. Needs a hands-on test in a licensed copy.
+
+## Project board and direction (2026-11-25)
+
+- Owner decision: no reliance on Bluebeam. Build our own drawing review, read and write standard PDF files, never sign up
+  for their developer programme. The aim is to beat it by learning from its mistakes, not to copy it.
+- The project is tracked on a White Canvas board, not in documents: decisions due, questions both ways, tools with estimates,
+  lessons, the app's own screens ("inception window") and a code map. The owner comments on the board.
+- `scripts/project-board.mjs` builds the board as a `.whitecanvas.json` file (drop it on any board). The plan lives in that
+  script until a live board exists. Options: `--graph <graph.json>` adds the code map, `--shots <dir>` adds screenshots.
+- Going live needs an agent token for Claude: a network secret on the `white-canvas` cloud environment for the agent server host.
+  Until then the board is rebuilt and sent as a file.
+- Graphify (`graphifyy` on PyPI, Apache-2.0) maps the code locally in about 4 seconds with no AI cost: `graphify update .`
+  Used to draw the code map, to trace what a change touches, and to save reading whole files. The graph is rebuilt per
+  session, not stored in the repository. No hooks or assistant integration are installed yet (owner decision pending).
+- Cards show their whole description (the three-line cut was removed in `src/index.css`). A card's date field is a real date;
+  estimates go in tags until cards get an estimate field.
+- The app refuses to be framed, itself included (`frame-ancestors 'none'` in `vercel.json`), so the inception window uses screenshots.
+
 ## Tests
 
 - `npm run test:unit` — 75 tests (geometry, store, validation, sync, previews).
