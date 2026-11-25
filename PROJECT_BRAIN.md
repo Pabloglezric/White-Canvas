@@ -17,6 +17,9 @@ Last updated: 2026-11-25
   RLS on `realtime.messages`), Postgres changes for writes made by the agent server.
 - Offline: IndexedDB cache and outbox per board; device-only boards (`local-…`) need no account.
 - Assets in private bucket `board-assets/<board_id>/…`, signed URLs.
+- A cloud board only points at files in its own folder. Items that arrive with files from elsewhere (paste from
+  another board, board JSON import) appear at once and are repointed when the copies land (`adoptForeignFiles` in
+  `src/board/ops.ts`, also run when an editor opens the board and on reconnect). A failed copy keeps the old reference.
 - Share links require sign-in; opening one calls `join_board` and adds a membership (no anonymous enumeration).
 - Agent access through hashed personal tokens (`api_tokens`), edge function uses the service role.
 - Own visual identity; no reference-product branding or assets.
@@ -46,9 +49,13 @@ Missing boards across devices, doubled initials, IFC scroll zoom and stale ratio
 open are in `docs/AUDIT.md` (last section). Migration `0004_catch_up_index.sql` is applied to the live database.
 The fixes are on branch `claude/laughing-albattani-kmvv1g`; production updates when that is merged into the production branch.
 
+Duplicated cloud boards get their own files (`adoptAssets` in `src/lib/boards.ts`, `copyAsset` in `src/board/assets.ts`):
+anything that puts items into a cloud board from elsewhere should go through `adoptAssets`. Branch `claude/loving-bohr-s5ikwd`,
+built on top of the sync fixes.
+
 ## Tests
 
-- `npm run test:unit` — 62 tests (geometry, store, validation, sync).
+- `npm run test:unit` — 72 tests (geometry, store, validation, sync).
 - `npm run test:e2e` — 21 tests on the production build, device-only boards, desktop and two Fold touch sizes.
 - CI: `.github/workflows/ci.yml` runs type-check, unit tests, build and end-to-end tests on every push.
 - Profiling handle: set `localStorage["wc.debug"] = "1"` to expose `window.__wc`.

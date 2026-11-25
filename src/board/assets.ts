@@ -4,6 +4,7 @@ import { get, set } from 'idb-keyval'
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { uid } from '../lib/util'
+import type { Item } from './types'
 
 interface Signed { url: string; exp: number }
 const SIGN_SECONDS = 60 * 60 * 24 * 7
@@ -109,6 +110,53 @@ export async function uploadAsset(boardId: string, file: Blob, name = 'file'): P
   })
   if (error) throw new Error(error.message)
   return `asset:${path}`
+}
+
+/**
+ * Copies a cloud file into another cloud board's folder, on the server (nothing is downloaded). A file that is gone,
+ * or that this account can no longer read, is left pointing where it was.
+ */
+export async function copyAsset(boardId: string, src: string): Promise<string> {
+  const from = src.slice(6)
+  const path = `${boardId}/${uid()}.${/\.([a-z0-9]{1,8})$/i.exec(from)?.[1].toLowerCase() || 'bin'}`
+  const { error } = await supabase.storage.from('board-assets').copy(from, path)
+  if (!error) return `asset:${path}`
+  // the storage service answers "not found" both for a missing file and for one this account has no access to
+  if (error.status === 404 || error.statusCode === '404' || error.statusCode === 'NoSuchKey') return src
+  throw new Error(error.message)
+}
+
+/** The files an item points at: an image and its small preview, a model, an attachment. */
+export const fileRefs = (it: Item): string[] => (it.type === 'image' ? [it.src, ...(it.thumb ? [it.thumb] : [])] : it.type === 'ifc' || it.type === 'file' ? [it.src] : [])
+
+/**
+ * Gives a cloud board its own copy of every file a list of items points at, and repoints the items at the copies:
+ * device-only files are uploaded, files in another cloud board's folder are copied on the server. Each file moves once.
+ */
+export async function adoptAssets(boardId: string, items: Item[], moved: Map<string, string>): Promise<Item[]> {
+  const foreign = [...new Set(items.flatMap(fileRefs))].filter((s) => s.startsWith('asset:') && !s.startsWith(`asset:${boardId}/`) && !moved.has(s))
+  for (let i = 0; i < foreign.length; i += 6) {
+    // a few at a time; a batch is always allowed to finish, so a caller that cleans up after a failure sees every copy made
+    const batch = await Promise.allSettled(foreign.slice(i, i + 6).map(async (src) => { moved.set(src, await copyAsset(boardId, src)) }))
+    const failed = batch.find((r) => r.status === 'rejected')
+    if (failed) throw failed.reason
+  }
+  const adopt = async (src: string, name: string): Promise<string> => {
+    if (!src.startsWith('local:')) return moved.get(src) ?? src
+    if (!moved.has(src)) {
+      const blob = (await get(`wc.asset.${src.slice(6)}`)) as Blob | undefined
+      // a file that has already gone missing on this device is left as it was; everything else moves
+      moved.set(src, blob ? await uploadAsset(boardId, blob, (blob as File).name || name) : src)
+    }
+    return moved.get(src)!
+  }
+  const out: Item[] = []
+  for (const it of items) {
+    if (it.type === 'image') out.push({ ...it, src: await adopt(it.src, 'image.png'), ...(it.thumb ? { thumb: await adopt(it.thumb, 'preview.webp') } : null) })
+    else if (it.type === 'ifc' || it.type === 'file') out.push({ ...it, src: await adopt(it.src, it.name) })
+    else out.push(it)
+  }
+  return out
 }
 
 /** A small preview of an image, used when it is tiny on screen. Returns null for small or undecodable images. */

@@ -135,7 +135,12 @@ Related gaps closed in the same pass:
 
 Checked with: 6 new unit tests, 2 new end-to-end tests (ratio tag, model zoom), and a signed-in run against a mocked backend for the dashboard move and the catch-up. Not exercised against the live backend: two real devices on one account, and live presence.
 
+Closed since: a duplicated cloud board (your own, or "Make my own copy" of a shared one) now gets its own copy of every image, PDF page, model and attachment, copied on the server into the new board's folder. Before, the copy read the original's files, so it broke when the original was deleted or sharing was turned off. If a file cannot be copied, the half-made copy is removed. The storage rules already allowed this (read on the original, write on your own board), checked against the live project's policies; 4 unit tests. Not exercised against the live backend.
+
+Closed since: items pasted from another board, or imported from a board JSON file, into a cloud board now get their own copy of every image, PDF page, model and attachment. The items appear at once; the files are copied in the background (on the server for cloud files, uploaded for device files) and the items, and their undo steps, are repointed when the copies land. Before, they kept reading the other board's folder, so they broke when that board was deleted and never loaded for members without access to it. A copy that fails keeps the old reference and is tried again on the next paste, on reconnect and the next time an editor opens the board; opening a board also repairs items pasted before this fix, if the person opening it can still read the original. Pasting within one board copies nothing. 6 unit tests. Not exercised against the live backend.
+
 Still open:
 
-- Duplicating a cloud board shares its files with the original, so deleting the original breaks the copy's images.
+- A cloud board's files pasted or duplicated into a device-only board still read the cloud board's folder: they need the account's access to it and break if it is deleted.
+- A board JSON file holds file references, not the files. Imported by someone who cannot read the original board, its images, models and attachments stay broken.
 - Deleting or moving a device-only board does not free the device storage its files used.
