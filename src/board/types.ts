@@ -30,6 +30,10 @@ export interface ItemBase {
   locked?: boolean
   by?: string // creator user id
   votes?: string[] // voter ids while a voting session is open
+  layer?: string // id of a LayerDef in the board settings
+  status?: string // free text; the board's status list gives the usual values and their colours
+  subject?: string // what the item is about, e.g. "Fire stopping"
+  fields?: Record<string, string> // the board's custom fields, by field name
 }
 
 export interface TextStyle {
@@ -148,7 +152,6 @@ export interface CardItem extends ItemBase {
   type: 'card'
   title: string
   desc?: string
-  status?: string
   assignee?: string
   due?: string
   tags?: string[]
@@ -235,12 +238,19 @@ export interface BoardMeta {
   trashed_at?: string | null
 }
 
+/** A named group of items that each person can show or hide for themselves. */
+export interface LayerDef { id: string; name: string; color: string }
+export interface StatusDef { name: string; color: string }
+
 export interface BoardSettings {
   grid?: 'dots' | 'lines' | 'none'
   bg?: string
   snap?: boolean
   voting?: { open: boolean; max: number; title?: string } | null
   timer?: { endsAt: number | null; duration: number; paused?: number | null } | null
+  layers?: LayerDef[]
+  statuses?: StatusDef[] // when absent, DEFAULT_STATUSES apply
+  fields?: string[] // names of the custom fields offered on every item
 }
 
 export const TEXT_TYPES: ItemType[] = ['sticky', 'text', 'shape']

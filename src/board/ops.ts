@@ -2,7 +2,7 @@
 import { uid } from '../lib/util'
 import { adoptAssets, fileRefs, isLocalBoard } from './assets'
 import { aabb, center, connectorGeom, itemBox, ptInBox, unionBoxes } from './geometry'
-import { S, apply, canEdit, commit, mutate, patchSilent, toast, useBoard, viewCenter, type BoardState, type Patch } from './store'
+import { S, apply, canEdit, commit, isHidden, mutate, patchSilent, toast, useBoard, viewCenter, type BoardState, type Patch } from './store'
 import type { Box, ConnectorItem, FrameItem, Item, Pt } from './types'
 
 export function maxZ(items = S().items): number {
@@ -249,7 +249,7 @@ export async function adoptForeignFiles(opts: { quiet?: boolean } = {}): Promise
 
 export function selectAll() {
   const { items } = S()
-  useBoard.setState({ selection: Object.values(items).filter((i) => !i.locked && i.type !== 'comment').map((i) => i.id) })
+  useBoard.setState({ selection: Object.values(items).filter((i) => !i.locked && i.type !== 'comment' && !isHidden(i)).map((i) => i.id) })
 }
 
 export function groupSelection() {

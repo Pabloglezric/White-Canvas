@@ -5,8 +5,9 @@ import { adoptAssets } from '../board/assets'
 import { deleteLocalBoard, listVersions, loadVersion, localBoards, localItems, saveLocalBoards, saveLocalItems } from '../board/sync'
 import { cloneItems } from '../board/ops'
 import { boardPreview } from '../board/export'
+import { sharedLists } from '../board/layers'
 import { normalizeItems } from '../board/validate'
-import type { BoardMeta, Item } from '../board/types'
+import type { BoardMeta, BoardSettings, Item } from '../board/types'
 
 export interface BoardRow extends BoardMeta { starred?: boolean; last_opened_at?: string | null; local?: boolean; shared?: boolean }
 
@@ -24,16 +25,16 @@ export async function listLocalBoards(): Promise<BoardRow[]> {
   return (await localBoards()).map((b) => ({ ...b, local: true })).sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
 }
 
-export async function createBoard(title: string, cloud: boolean, items: Item[] = []): Promise<string> {
+export async function createBoard(title: string, cloud: boolean, items: Item[] = [], settings: BoardSettings = {}): Promise<string> {
   const now = new Date().toISOString()
   if (!cloud) {
     const id = `local-${uid()}`
-    const meta: BoardMeta = { id, title, owner_id: 'local-user', link_access: 'none', settings: {}, created_at: now, updated_at: now, thumbnail: items.length ? await boardPreview(Object.fromEntries(items.map((i) => [i.id, i]))) : null }
+    const meta: BoardMeta = { id, title, owner_id: 'local-user', link_access: 'none', settings, created_at: now, updated_at: now, thumbnail: items.length ? await boardPreview(Object.fromEntries(items.map((i) => [i.id, i]))) : null }
     await saveLocalBoards([meta, ...(await localBoards())])
     await saveLocalItems(id, items)
     return id
   }
-  const { data, error } = await supabase.from('boards').insert({ title }).select('id').single()
+  const { data, error } = await supabase.from('boards').insert(Object.keys(settings).length ? { title, settings } : { title }).select('id').single()
   if (error) throw new Error(error.message)
   await insertItems(data.id, items)
   return data.id
@@ -103,9 +104,11 @@ export async function refreshPreview(b: BoardRow): Promise<string | null> {
 
 export async function duplicateBoard(b: BoardRow, cloud: boolean): Promise<string> {
   const items = cloneItems(await boardItems(b), 0, 0).map((it, i) => ({ ...it, z: it.z || i + 1 }))
-  if (!cloud) return createBoard(`${b.title} (copy)`, false, items)
+  // the layers, statuses and fields the items refer to come along; the timer and voting do not
+  const lists = sharedLists(b.settings)
+  if (!cloud) return createBoard(`${b.title} (copy)`, false, items, lists)
   // a cloud copy gets its own files: it must outlive the original, and any access to it
-  const id = await createBoard(`${b.title} (copy)`, true)
+  const id = await createBoard(`${b.title} (copy)`, true, [], lists)
   try {
     await insertItems(id, await adoptAssets(id, items, new Map()))
   } catch (e) {

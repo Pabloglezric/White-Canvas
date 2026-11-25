@@ -11,3 +11,4 @@ public/wasm/*.wasm
 tsconfig.tsbuildinfo
 test-results
 playwright-report
+graphify-out

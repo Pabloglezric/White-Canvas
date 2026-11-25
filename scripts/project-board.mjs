@@ -34,22 +34,24 @@ text(start, '**Progress so far**', 30, 505, 900, 22)
 grid(start, [
   { title: 'Bluebeam research finished', desc: 'How it works, every capability, its weak points, the web technology to beat it. Report and notes are in the repository.', status: 'Done', due: '2026-11-25', tags: ['research'], fill: C.done },
   { title: 'Graphify tested on the code', desc: '704 symbols and 2,587 connections mapped in 3.6 seconds, on the machine, at no AI cost. See frame 8.', status: 'Done', due: '2026-11-25', tags: ['method'], fill: C.done },
-  { title: 'Project board, first version', desc: 'This board. Built as a file for now; it goes live once Claude has an agent token (see decisions).', status: 'In review', due: '2026-11-25', tags: ['method'], fill: C.done },
+  { title: 'Project board, first version', desc: 'This board. Live since 25 Nov: Claude now reads and updates it directly with an agent token (see D2).', status: 'Live', due: '2026-11-25', tags: ['method'], fill: C.done },
 ], card, { y0: 560, cols: 3, cw: 320, rh: 0 })
 items.filter((i) => i.parent === start.id && i.type === 'card').forEach((c) => { c.w = 300; c.h = 300 })
 
 // ---------- 2. Decisions due ----------
+// Each decision gets a number (D1, D2, …) from its place in this list, so it can be named in a message.
+// Add new decisions at the end: a number, once given, must keep meaning the same decision.
 const dec = frame('2 · Decisions due', 1100, 0, 1330, 900, '#fff7ed')
 grid(dec, [
   { title: 'Relationship with Bluebeam', desc: 'You decided: no reliance on Bluebeam. We build our own, read and write standard PDF files, and never sign up for their developer programme.', status: 'Decided', due: '2026-11-25', tags: ['direction'], fill: C.done },
-  { title: 'Give Claude a board token', desc: 'Needed so Claude can update a live board instead of sending files. Create a token in the app (Settings), then add it to the "white-canvas" environment as a network secret for sypmrdvuimessucfeflo.supabase.co.', status: 'Needs you', who: 'You', due: '2026-11-27', tags: ['access'], fill: C.decision },
-  { title: 'What to build first', desc: 'A (recommended): foundations first: item layers and status, then sharp vector PDF sheets. Everything else stands on these.\nB: measuring on today\'s blurry PDF pages for a quick demo, redone later.', status: 'Needs you', who: 'You', due: '2026-11-28', tags: ['roadmap'], fill: C.decision },
+  { title: 'Give Claude a board token', desc: 'Working. Claude changed this card through the live board on 25 Nov, so the token is proven.\nWhat happened: the token was saved on the "white-canvas" environment, but sessions start on "Default", so it never arrived. It is now saved on "Default" as well.', status: 'Done', who: 'You', due: '2026-11-25', tags: ['access'], fill: C.done },
+  { title: 'What to build first', desc: 'You said: start with stage 1. Claude reads that as Phase 1 · Foundations (option A): item layers, status and custom fields first, then sharp vector PDF sheets.\nIf you meant Phase 0 (the three short trials), say so here and Claude switches.', status: 'Decided: A', who: 'You', due: '2026-11-25', tags: ['roadmap'], fill: C.done },
   { title: 'Who is the first user?', desc: 'Sets the order after the foundations.\nA: design reviewer on a Mac: review sessions first.\nB: site manager on a phone: snag lists first.\nC: estimator: measurement and counts first.', status: 'Needs you', who: 'You', due: '2026-11-28', tags: ['roadmap'], fill: C.decision },
-  { title: 'Inception window: pictures first?', desc: 'The app refuses to be shown inside itself (a security rule). Recommended: screenshots refreshed by Claude after each change, which you comment on. A live window can follow as its own tool.', status: 'Needs you', who: 'You', due: '2026-11-28', tags: ['method'], fill: C.decision },
-  { title: 'Graphify always on?', desc: 'Recommended: rebuild the code map at the start of each session (3.6 s) and after each merge, and redraw frame 8. Not stored in the repository. Alternative: a hook that rebuilds on every commit.', status: 'Needs you', who: 'You', due: '2026-11-28', tags: ['method'], fill: C.decision },
-  { title: 'Merge the research pull request', desc: 'Pull request 7 holds the research and this board\'s generator. Merging triggers a production deploy, although only documents and scripts change.', status: 'Needs you', who: 'You', due: '2026-11-30', tags: ['housekeeping'], fill: C.decision },
+  { title: 'Inception window: pictures first?', desc: 'You decided: screenshots are fine. Claude refreshes them in frame 7 after each change and you comment on them. A live window stays as an idea in frame 5.', status: 'Decided', who: 'You', due: '2026-11-25', tags: ['method'], fill: C.done },
+  { title: 'Graphify always on?', desc: 'You decided: yes. Claude rebuilds the code map at the start of each session and after each merge, and redraws frame 8. Nothing is stored in the repository.', status: 'Decided: yes', who: 'You', due: '2026-11-25', tags: ['method'], fill: C.done },
+  { title: 'Merge the research pull request', desc: 'Done on 25 Nov: pull request 7 is merged, so pull requests 1 to 7 are all in production.', status: 'Done', who: 'You', due: '2026-11-25', tags: ['housekeeping'], fill: C.done },
   { title: 'Paid database plan', desc: 'The free plan pauses when idle and keeps no point-in-time backups. Needed before review sessions are offered as a record. Not urgent.', status: 'Later', who: 'You', tags: ['cost', 'before phase 4'], fill: C.decision },
-], card, { cols: 3, cw: 430, rh: 270 })
+].map((c, i) => ({ ...c, title: `D${i + 1} · ${c.title}` })), card, { cols: 3, cw: 430, rh: 270 })
 items.filter((i) => i.parent === dec.id && i.type === 'card').forEach((c) => { c.h = 250 })
 
 // ---------- 3. Questions from Claude ----------

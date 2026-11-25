@@ -15,7 +15,7 @@ import {
   nudge, pasteItems, reorder, reparent, selectAll, toggleLock, ungroupSelection, withGroups,
 } from './ops'
 import {
-  S, canComment, canEdit, commit, fitAll, fitBox, contentBox, mutate, orderedFrames, redo, rollback, toast, undo, update,
+  S, canComment, canEdit, commit, fitAll, fitBox, contentBox, isHidden, mutate, orderedFrames, redo, rollback, toast, undo, update,
   useBoard, viewBox, zoomAt, zoomTo, type Patch,
 } from './store'
 import type { Box, ConnEnd, ConnectorItem, DrawItem, Item, Pt, TextItem, Tool } from './types'
@@ -459,7 +459,7 @@ export class Interaction {
         const have = new Set(ids)
         for (const id in s.items) {
           const it = s.items[id]
-          if (it.locked || it.type === 'comment' || have.has(id)) continue
+          if (it.locked || it.type === 'comment' || have.has(id) || isHidden(it, s.hiddenLayers)) continue
           const b = itemBox(it, s.items)
           // frames must be fully enclosed; everything else just touched
           if (it.type === 'frame' ? b.x >= box.x && b.y >= box.y && b.x + b.w <= box.x + box.w && b.y + b.h <= box.y + box.h : intersects(box, b)) ids.push(id)
@@ -535,7 +535,7 @@ export class Interaction {
       const moving = new Set(ids)
       for (const id in s.items) {
         const it = s.items[id]
-        if (moving.has(id) || it.type === 'connector' || it.type === 'draw' || it.type === 'comment') continue
+        if (moving.has(id) || it.type === 'connector' || it.type === 'draw' || it.type === 'comment' || isHidden(it, s.hiddenLayers)) continue
         const b = aabb(it)
         if (intersects(view, b)) { others.push(b); if (others.length > 160) break }
       }
@@ -1032,7 +1032,7 @@ export class Interaction {
       case 'Tab': {
         // keyboard path to every item: Tab walks the board in reading order
         if (document.activeElement !== this.el && document.activeElement !== document.body) return
-        const list = Object.values(s.items).filter((i) => i.type !== 'connector' && i.type !== 'draw' && !i.locked).sort((a, b) => (Math.abs(a.y - b.y) > 40 ? a.y - b.y : a.x - b.x))
+        const list = Object.values(s.items).filter((i) => i.type !== 'connector' && i.type !== 'draw' && !i.locked && !isHidden(i, s.hiddenLayers)).sort((a, b) => (Math.abs(a.y - b.y) > 40 ? a.y - b.y : a.x - b.x))
         if (!list.length) return
         e.preventDefault()
         const at = list.findIndex((i) => i.id === s.selection[0])

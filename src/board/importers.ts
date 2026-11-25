@@ -5,6 +5,7 @@ import { providerEmbed } from './embeds'
 import { isLocalBoard, makeThumb, uploadAsset } from './assets'
 import { make } from './defaults'
 import { addItems, freeSpot, parseClipboardItems, pasteItems } from './ops'
+import { adoptLists } from './details'
 import { normalizeItems, safeHttpUrl } from './validate'
 import { aabb, intersects, unionBoxes } from './geometry'
 import { S, fitBox, toast, useBoard, viewBox } from './store'
@@ -203,7 +204,7 @@ export async function importFiles(files: File[], at: Pt) {
         x += t.w + 30
       } else if (ext === 'json') {
         const data = JSON.parse(await file.text())
-        if (data?.app === 'white-canvas' && Array.isArray(data.items)) { pasteItems(normalizeItems(data.items), at); continue }
+        if (data?.app === 'white-canvas' && Array.isArray(data.items)) { pasteItems(normalizeItems(data.items), at); adoptLists(data.lists); continue }
         created.push(make.code({ x, y: at.y - 110, code: JSON.stringify(data, null, 2).slice(0, 20000), lang: 'json' }))
         x += 450
       } else if (ext === 'md' || ext === 'txt') {

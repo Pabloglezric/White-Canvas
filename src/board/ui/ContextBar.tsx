@@ -12,6 +12,7 @@ import { tableEdit } from '../items/Blocks'
 import { alignSelection, deleteSelection, duplicateSelection, groupSelection, setStyle, toggleLock, ungroupSelection } from '../ops'
 import { S, fitBox, orderedFrames, useBoard } from '../store'
 import type { Cap, ConnectorItem, Dash, Item, Route, ShapeItem, TableItem } from '../types'
+import { DetailsButton } from './Details'
 import { Pop, Swatches, useFlexMode, useNarrow } from './kit'
 
 const CAPS: Cap[] = ['none', 'arrow', 'triangle', 'dot', 'diamond', 'bar']
@@ -214,6 +215,7 @@ export function ContextBar() {
             </>
           )}
           <div className="wc-sep" />
+          <DetailsButton sel={sel.filter((i) => i.type !== 'comment')} />
           <button className="wc-btn" title="Duplicate (Ctrl+D)" onClick={() => duplicateSelection()}><Copy size={15} /></button>
           <button className="wc-btn" title="Lock (Ctrl+Shift+L)" onClick={() => toggleLock()}><Lock size={15} /></button>
           <button className="wc-btn is-danger" title="Delete" onClick={deleteSelection}><Trash2 size={15} /></button>
