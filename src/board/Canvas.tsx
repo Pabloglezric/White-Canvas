@@ -179,6 +179,12 @@ function Overlay() {
   const peers = useBoard((s) => s.peers)
   const tool = useBoard((s) => s.tool)
   const role = useBoard((s) => s.role)
+  const meId = useBoard((s) => s.me.id)
+  // A cursor glides between the positions its owner sends. When it is our own view that moved, it must stay
+  // glued to the board instead of gliding after it.
+  const lastCamera = useRef(camera)
+  const viewMoved = lastCamera.current !== camera
+  useEffect(() => { lastCamera.current = camera })
   const editable = canEdit() && role !== 'viewer'
   const sel = selection.map((id) => items[id]).filter(Boolean)
   const z = camera.z
@@ -261,9 +267,9 @@ function Overlay() {
       {Object.values(peers).map((peer) => peer.cursor && now - peer.seen < 15000 && (() => {
         const q = sc(peer.cursor!.x, peer.cursor!.y)
         return (
-          <div key={peer.id} className="wc-cursor" style={{ transform: `translate(${q.x}px, ${q.y}px)` }}>
+          <div key={peer.id} className="wc-cursor" style={{ transform: `translate(${q.x}px, ${q.y}px)`, transition: viewMoved ? 'none' : undefined }}>
             <svg width="18" height="18" viewBox="0 0 18 18"><path d="M2 1l13 7-5.5 1.6L7 15z" fill={peer.color} stroke="#fff" strokeWidth="1.2" strokeLinejoin="round" /></svg>
-            <span style={{ background: peer.color }}>{peer.name}</span>
+            <span style={{ background: peer.color }}>{peer.user && peer.user === meId ? 'You (other device)' : peer.name}</span>
           </div>
         )
       })())}

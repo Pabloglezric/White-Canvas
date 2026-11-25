@@ -186,10 +186,11 @@ function paintItem(ctx: CanvasRenderingContext2D, it: Item, items: Record<string
   if (rotated) ctx.restore()
 }
 
-export function paintOverview(canvas: HTMLCanvasElement, items: Record<string, Item>, ids: string[], camera: Camera, dark: boolean) {
+export function paintOverview(canvas: HTMLCanvasElement, items: Record<string, Item>, ids: string[], camera: Camera, dark: boolean, density?: number) {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
-  const dpr = canvas.width / (canvas.clientWidth || 1)
+  // a canvas that is not on screen (board previews) has no layout size, so its pixel density is given
+  const dpr = density ?? canvas.width / (canvas.clientWidth || 1)
   ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.clearRect(0, 0, canvas.width, canvas.height)
   ctx.setTransform(dpr * camera.z, 0, 0, dpr * camera.z, dpr * camera.x, dpr * camera.y)

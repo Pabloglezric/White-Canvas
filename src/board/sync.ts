@@ -7,7 +7,7 @@ import { del, get, keys, set } from 'idb-keyval'
 import { supabase } from '../lib/supabase'
 import { debounce, throttle } from '../lib/util'
 import { forgetAssets, isLocalBoard, releaseAssets } from './assets'
-import { thumbnailSvg } from './export'
+import { boardPreview, isOldPreview } from './export'
 import { bus } from './interaction'
 import { finishEditing } from './items/RichText'
 import { adoptForeignFiles } from './ops'
@@ -121,13 +121,25 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     useBoard.setState({ meta, role: 'owner' })
     ready(toMap(await localItems(boardId)))
     const writeItems = () => { if (S().boardId === boardId) saveLocalItems(boardId, Object.values(S().items)).catch(() => {}) }
-    const writeMeta = () => idle(async () => {
+    // changes to this board's entry in the list happen one after another, so none overwrites another
+    let listWrite: Promise<unknown> = Promise.resolve()
+    const editEntry = (change: (b: BoardMeta) => BoardMeta) => (listWrite = listWrite.then(async () => saveLocalBoards((await localBoards()).map((b) => (b.id === boardId ? change(b) : b)))).catch(() => {}))
+    const writeMeta = () => idle(() => {
       const s = S()
       if (s.boardId !== boardId) return
-      const all = await localBoards()
-      await saveLocalBoards(all.map((b) => (b.id === boardId ? { ...b, title: s.meta?.title || b.title, settings: s.meta?.settings || b.settings, updated_at: new Date().toISOString(), thumbnail: thumbnailSvg(s.items) } : b)))
+      editEntry((b) => ({ ...b, title: s.meta?.title || b.title, settings: s.meta?.settings || b.settings, updated_at: new Date().toISOString() }))
     })
-    const save = debounce(() => { writeItems(); writeMeta() }, 400)
+    // The dashboard picture of the board. Drawing it costs more than saving, so it follows edits at a slower pace.
+    let previewDue = isOldPreview(meta.thumbnail)
+    const writePreview = async (items: Record<string, Item>) => {
+      previewDue = false
+      const thumbnail = Object.keys(items).length ? await boardPreview(items) : null
+      await editEntry((b) => ({ ...b, thumbnail }))
+      window.dispatchEvent(new Event('wc-boards-changed'))
+    }
+    const savePreview = debounce(() => idle(() => { if (S().boardId === boardId) writePreview(S().items).catch(() => {}) }), 2500)
+    if (previewDue) savePreview()
+    const save = debounce(() => { writeItems(); writeMeta(); previewDue = true; savePreview() }, 400)
     // text being typed is saved too, so closing the tab mid-sentence loses nothing
     const saveLive = debounce(writeItems, 900)
     const persistNow = () => { finishEditing(); save.cancel(); saveLive.cancel(); writeItems() }
@@ -143,6 +155,9 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       close: () => {
         finishEditing()
         save.cancel(); saveLive.cancel(); writeItems(); writeMeta()
+        // leaving with edits not yet pictured: draw the preview now, from the board as it is being left
+        savePreview.cancel()
+        if (previewDue) writePreview(S().items).catch(() => {})
         document.removeEventListener('visibilitychange', onHide)
         window.removeEventListener('pagehide', persistNow)
         hooks.onCommit = undefined; hooks.onLive = undefined
@@ -308,11 +323,18 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   window.addEventListener('pagehide', leave)
   document.addEventListener('visibilitychange', onHide)
 
-  const saveThumb = debounce(() => idle(() => {
-    const s = S()
-    if (s.boardId !== boardId || (s.role !== 'owner' && s.role !== 'editor')) return
-    supabase.from('boards').update({ thumbnail: thumbnailSvg(s.items) }).eq('id', boardId).then(() => {})
-  }), 8000)
+  // The dashboard picture of the board: redrawn a little after edits, and when leaving with edits not yet pictured.
+  const mayEdit = () => S().role === 'owner' || S().role === 'editor'
+  let previewDue = false
+  let lastPreview = S().meta?.thumbnail || ''
+  const writePreview = async (items: Record<string, Item>) => {
+    previewDue = false
+    const thumbnail = Object.keys(items).length ? await boardPreview(items) : ''
+    if (thumbnail === lastPreview) return
+    lastPreview = thumbnail
+    await supabase.from('boards').update({ thumbnail: thumbnail || null }).eq('id', boardId)
+  }
+  const saveThumb = debounce(() => idle(() => { if (S().boardId === boardId && mayEdit()) writePreview(S().items).catch(() => {}) }), 8000)
 
   // ----- live updates: only what changed since the last packet -----
   const liveIds = new Set<string>()
@@ -353,10 +375,13 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     const light = changed.length <= 80 ? changed.filter((it) => !('pts' in it && it.pts.length > 1500) && !('preview' in it && it.preview)) : []
     channels.ops?.send({ type: 'broadcast', event: 'commit', payload: { c: clientId, items: light, removed: removed.map((r) => ({ id: r.id, rev: r.rev })) } })
     useBoard.setState({ syncState: navigator.onLine ? 'saving' : 'offline' })
+    previewDue = true
     saveOutbox(); saveCache(); flushSoon(); saveThumb()
   }
   if (dirty.size) flush()
   saveCache()
+  // a preview from an older version (plain boxes), or none at all: draw a real one
+  if (S().meta && mayEdit() && isOldPreview(S().meta?.thumbnail) && Object.keys(S().items).length) { previewDue = true; saveThumb() }
   // files that items brought in from another board and that have not been copied here yet (a paste made offline,
   // a copy that failed, a board left before the copy landed)
   void adoptForeignFiles({ quiet: true })
@@ -406,13 +431,14 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       useBoard.setState({ peers: next, following: following && next[following] ? following : null })
     })
     .on('broadcast', { event: 'cursor' }, ({ payload }) => {
-      const p = payload as { c: string; n?: string; col?: string; u?: string; x?: number; y?: number; sel?: string[]; cam?: unknown }
+      const p = payload as { c: string; n?: string; col?: string; u?: string; x?: number; y?: number; off?: unknown; sel?: string[]; cam?: unknown }
       if (typeof p?.c !== 'string' || p.c === myClient) return
       const known = !!peers()[p.c]
       const patch: Partial<Peer> = { seen: Date.now() }
       if (Array.isArray(p.sel)) patch.sel = p.sel.filter((x) => typeof x === 'string').slice(0, 30)
       if (p.n) { patch.name = safeName(p.n); patch.color = safeHex(p.col); patch.user = String(p.u || '') }
       if (typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y)) patch.cursor = { x: p.x, y: p.y }
+      else if (p.off) patch.cursor = null // their pointer left the board, or their app went to the background
       const cam = finiteCam(p.cam)
       if (cam) patch.cam = cam
       setPeer(p.c, patch)
@@ -420,6 +446,8 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       if (S().following === p.c && cam) fitBox({ x: -cam.x / cam.z, y: -cam.y / cam.z, w: cam.vw / cam.z, h: cam.vh / cam.z }, 0, false, 8)
     })
     .on('broadcast', { event: 'bye' }, ({ payload }) => dropPeer(String((payload as { c: unknown }).c)))
+    // a device whose connection has gone is removed at once, with its cursor, instead of lingering as a ghost
+    .on('presence', { event: 'leave' }, ({ key }) => { if (!(presence.presenceState()[key] || []).length) dropPeer(key) })
     .subscribe((status) => {
       if (status === 'SUBSCRIBED') { presence.track({ user: me.id, name: me.name, color: me.color }); hello() }
     })
@@ -527,18 +555,29 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
   channels.db = db
 
   let lastCam = 0
-  const cursorPayload = (p: Pt | null, full: boolean) => {
+  // Every packet says where the pointer is now, or that it is off the board, so a missed packet cannot leave
+  // a cursor stranded on someone else's screen.
+  let away = document.visibilityState === 'hidden'
+  const cursorPayload = (full: boolean) => {
     const s = S()
     const now = Date.now()
     const payload: Record<string, unknown> = { c: myClient, sel: s.selection.slice(0, 30) }
     if (full) Object.assign(payload, { n: me.name, col: me.color, u: me.id })
-    if (p) { payload.x = Math.round(p.x); payload.y = Math.round(p.y) }
+    const p: Pt | null = away ? null : bus.pointer?.() ?? null
+    if (p) { payload.x = Math.round(p.x * 10) / 10; payload.y = Math.round(p.y * 10) / 10 }
+    else payload.off = 1
     if (full || now - lastCam > 200) { lastCam = now; payload.cam = { ...s.camera, vw: s.viewport.w, vh: s.viewport.h } }
     return payload
   }
   // Announce ourselves over broadcast too: presence updates alone can be missed.
-  function hello() { presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(null, true) }) }
-  const sendCursor = throttle((p: Pt | null) => { presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(p, false) }) }, 60)
+  function hello() { presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(true) }) }
+  const sendCursor = throttle(() => { presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(false) }) }, 60)
+  // In the background (another app, a locked phone) timers stop, so say the pointer is gone before that happens.
+  const onAway = () => {
+    away = document.visibilityState === 'hidden'
+    if (Object.keys(peers()).length) presence.send({ type: 'broadcast', event: 'cursor', payload: cursorPayload(false) })
+  }
+  document.addEventListener('visibilitychange', onAway)
 
   /** Access can be withdrawn while a board is open; check now and then, and close the board if it has gone. */
   let checking = false
@@ -561,14 +600,19 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     hello()
     const now = Date.now()
     const state = presence.presenceState()
-    for (const key in peers()) if (now - peers()[key].seen > 35000 && !state[key]) dropPeer(key)
+    for (const key in peers()) {
+      const peer = peers()[key]
+      if (now - peer.seen > 35000 && !state[key]) dropPeer(key)
+      // nothing heard for more than one heartbeat: the device is asleep or cut off, so its pointer is not there
+      else if (peer.cursor && now - peer.seen > 15000) setPeer(key, { cursor: null })
+    }
     if (++beats % 6 === 0) checkAccess()
   }, 10000)
   const onLeave = () => { presence.send({ type: 'broadcast', event: 'bye', payload: { c: myClient } }) }
   window.addEventListener('pagehide', onLeave)
-  bus.cursor = (p) => { if (Object.keys(peers()).length) sendCursor(p) }
+  bus.cursor = () => { if (Object.keys(peers()).length) sendCursor() }
   const unsubSel = useBoard.subscribe((s, p) => {
-    if ((s.selection !== p.selection || s.camera !== p.camera) && Object.keys(s.peers).length) sendCursor(null)
+    if ((s.selection !== p.selection || s.camera !== p.camera) && Object.keys(s.peers).length) sendCursor()
   })
 
   if (meta) {
@@ -581,7 +625,9 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
     flush: async () => { flushSoon.cancel(); await flush() },
     close: () => {
       finishEditing()
-      flushSoon.flush(); saveOutbox.flush(); saveThumb.flush(); checkpoint.cancel()
+      flushSoon.flush(); saveOutbox.flush(); checkpoint.cancel()
+      saveThumb.cancel()
+      if (previewDue && mayEdit() && S().boardId === boardId && S().status === 'ready') writePreview(S().items).catch(() => {})
       if (S().boardId === boardId && S().status === 'ready') set(CACHE, Object.values(S().items)).catch(() => {})
       saveCache.cancel()
       window.removeEventListener('online', onOnline)
@@ -591,6 +637,7 @@ export async function openBoard(boardId: string, me: { id: string; name: string;
       cancelAnimationFrame(inboxRaf)
       unsubSel()
       clearInterval(heartbeat); window.removeEventListener('pagehide', onLeave); onLeave()
+      document.removeEventListener('visibilitychange', onAway)
       hooks.onCommit = undefined; hooks.onLive = undefined; bus.cursor = undefined
       for (const ch of [ops, db]) supabase.removeChannel(ch)
       setTimeout(() => supabase.removeChannel(presence), 400) // let the goodbye message leave first
